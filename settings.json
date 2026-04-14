@@ -1,0 +1,12 @@
+{
+  "idle_limit": 5,
+  "focus_threshold": 60,
+  "developer_apps": [
+    "Code",
+    "Cursor",
+    "IntelliJ IDEA",
+    "PyCharm",
+    "WebStorm"
+  ],
+  "developer_focus_delta": 10
+}
