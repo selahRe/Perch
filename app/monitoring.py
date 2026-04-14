@@ -62,7 +62,6 @@ class KeyboardMonitor:
         self._sampler_thread = threading.Thread(target=self._sampling_loop, daemon=True)
         self._sampler_thread.start()
         self._started = True
-        self._complete_minute()
 
     def stop(self) -> None:
         self._stop_event.set()
