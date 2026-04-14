@@ -1,0 +1,49 @@
+{
+  "reminder_types": [
+    "hydration",
+    "stretching",
+    "meeting"
+  ],
+  "check_interval": 60,
+  "pet_visible_always": true,
+  "kpm_thresholds": {
+    "idle": 5,
+    "focus": 50
+  },
+  "idle_limit": 5,
+  "focus_threshold": 60,
+  "developer_apps": [
+    "Code",
+    "Cursor",
+    "IntelliJ IDEA",
+    "PyCharm",
+    "WebStorm"
+  ],
+  "developer_focus_delta": 10,
+  "protocol_adapter": {
+    "focused_long_kpm_threshold": 100,
+    "focused_long_duration_seconds": 1800,
+    "cooldown_seconds": 90,
+    "cooldown_fallback_speak": "...",
+    "idle": {
+      "visible": true,
+      "emotion": "idle",
+      "speak": "..."
+    },
+    "relaxed": {
+      "visible": true,
+      "emotion": "happy",
+      "speak": "Steady pace. You're doing well."
+    },
+    "focused": {
+      "visible": true,
+      "emotion": "play",
+      "speak": "Nice focus streak. Keep going!"
+    },
+    "focused_long": {
+      "visible": true,
+      "emotion": "happy",
+      "speak": "Great job! You've been focused for {status_duration_minutes} minutes!"
+    }
+  }
+}
