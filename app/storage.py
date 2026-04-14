@@ -61,18 +61,19 @@ class MetricsRepository:
                 connection.commit()
 
     def load_history(self, since_timestamp: datetime) -> list[sqlite3.Row]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT
-                    id,
-                    timestamp,
-                    kpm_value,
-                    status_label
-                FROM monitoring_history
-                WHERE timestamp >= ?
-                ORDER BY timestamp ASC
-                """,
-                (since_timestamp.astimezone(timezone.utc).isoformat(),),
-            ).fetchall()
+        with self._lock:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        id,
+                        timestamp,
+                        kpm_value,
+                        status_label
+                    FROM monitoring_history
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (since_timestamp.astimezone(timezone.utc).isoformat(),),
+                ).fetchall()
         return list(rows)
