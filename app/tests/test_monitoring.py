@@ -4,9 +4,10 @@ import json
 import app.main as main_module
 from app.config_store import ConfigStore
 from app.classifier import StatusClassifier
-from app.models import MonitoringSettings, PetState, UserProfile
+from app.models import MonitoringSettings, MonitoringState, PetState, StatusClassification, UserProfile
 from app.monitoring import KeyboardMonitor
 from app.protocol_adapter import PetUpdateAdapter, get_pet_update
+from app.reminder_manager import ReminderManager
 from app.settings_store import SettingsStore
 from app.storage import MetricsRepository
 
@@ -20,6 +21,8 @@ def write_settings(path, idle_limit=5, focus_threshold=60):
                 "developer_apps": ["Code"],
                 "developer_focus_delta": 10,
                 "reminder_types": ["hydration", "stretching", "meeting"],
+                "hydration_reminder_interval_minutes": 30,
+                "stretching_reminder_interval_minutes": 45,
                 "check_interval": 60,
                 "pet_visible_always": True,
                 "kpm_thresholds": {"idle": 5, "focus": 50},
@@ -49,7 +52,7 @@ def test_repository_ttl_cleanup_and_order(tmp_path):
     new_time = datetime.now(timezone.utc) - timedelta(minutes=10)
 
     repository.save_minute_record(timestamp=old_time, kpm_value=2, status_label="Idle")
-    repository.save_minute_record(timestamp=new_time, kpm_value=40, status_label="Relaxed")
+    repository.save_minute_record(timestamp=new_time, kpm_value=40, status_label="Relaxed", app_name="Code")
     repository.cleanup_older_than(hours=24)
 
     rows = repository.load_history(datetime.now(timezone.utc) - timedelta(hours=24))
@@ -57,6 +60,7 @@ def test_repository_ttl_cleanup_and_order(tmp_path):
     assert len(rows) == 1
     assert rows[0]["kpm_value"] == 40
     assert rows[0]["status_label"] == "Relaxed"
+    assert rows[0]["app_name"] == "Code"
 
 
 def test_status_classifier_uses_dynamic_settings_and_dev_app_adjustment(tmp_path):
@@ -222,7 +226,15 @@ def test_config_routes_round_trip_bundle_and_save(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "config_store", store)
 
     bundle = main_module.load_config_bundle()
-    profile_result = main_module.save_profile(UserProfile(username="Nora", gender="female", onboarding_completed=True))
+    profile_result = main_module.save_profile(
+        UserProfile(
+            username="Nora",
+            gender="female",
+            freeTime="Evening (6pm - 12am)",
+            reminders={"hydration": True, "stretching": False, "meetings": True},
+            onboarding_completed=True,
+        )
+    )
     settings_result = main_module.save_settings(
         MonitoringSettings(reminder_types=["hydration", "meeting"], check_interval=45, pet_visible_always=False)
     )
@@ -234,6 +246,8 @@ def test_config_routes_round_trip_bundle_and_save(tmp_path, monkeypatch):
 
     reloaded = main_module.load_config_bundle()
     assert reloaded.profile.username == "Nora"
+    assert reloaded.profile.free_time == "Evening (6pm - 12am)"
+    assert reloaded.profile.reminders.stretching is False
     assert reloaded.settings.check_interval == 45
     assert reloaded.settings.pet_visible_always is False
 
@@ -257,3 +271,85 @@ def test_pet_update_route_returns_frontend_contract(tmp_path, monkeypatch):
     assert payload.visible is True
     assert payload.emotion in ["happy", "eat", "play", "idle"]
     assert isinstance(payload.speak, str)
+
+
+def test_reminder_manager_triggers_hydration_on_focused_interval(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path)
+    store = SettingsStore(settings_path)
+    manager = ReminderManager(store)
+
+    settings = store.load()
+    settings.hydration_reminder_interval_minutes = 2
+    settings.stretching_reminder_interval_minutes = 99
+    store.save(settings)
+
+    focused_state = MonitoringState(
+        timestamp=datetime.now(timezone.utc),
+        kpm_value=120,
+        status=StatusClassification(label="Focused", confidence=0.9),
+        app_name="Code",
+    )
+    manager.process_minute(focused_state)
+    manager.process_minute(focused_state)
+
+    payload = manager.pop_pending_update()
+    assert payload is not None
+    assert payload.emotion == "happy"
+    assert "Drink some water" in payload.speak
+
+
+def test_reminder_manager_enters_freetime_after_five_idle_minutes(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path)
+    store = SettingsStore(settings_path)
+    manager = ReminderManager(store)
+
+    idle_state = MonitoringState(
+        timestamp=datetime.now(timezone.utc),
+        kpm_value=1,
+        status=StatusClassification(label="Idle", confidence=1.0),
+        app_name="Code",
+    )
+    for _ in range(5):
+        manager.process_minute(idle_state)
+
+    payload = manager.pop_pending_update()
+    assert payload is not None
+    assert payload.visible is True
+    assert payload.emotion == "play"
+
+
+def test_pet_update_route_prioritizes_pending_reminder(tmp_path, monkeypatch):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path)
+    monitor = KeyboardMonitor(
+        db_path=tmp_path / "metrics.sqlite3",
+        settings_path=settings_path,
+        minute_seconds=9999,
+    )
+    monitor.start = lambda: None
+    monitor.stop = lambda: None
+    adapter = PetUpdateAdapter(monitor.settings_store)
+    store = ConfigStore(monitor.settings_store, profile_path=tmp_path / "profile.json")
+    reminders = ReminderManager(monitor.settings_store)
+
+    monkeypatch.setattr(main_module, "keyboard_monitor", monitor)
+    monkeypatch.setattr(main_module, "pet_update_adapter", adapter)
+    monkeypatch.setattr(main_module, "config_store", store)
+    monkeypatch.setattr(main_module, "reminder_manager", reminders)
+
+    monkeypatch.setattr(
+        reminders,
+        "pop_pending_update",
+        lambda: PetState(
+            visible=True,
+            emotion="happy",
+            speak="Drink some water! You've been working for a while.",
+        ),
+    )
+
+    payload = main_module.get_pet_update_payload()
+    assert payload.visible is True
+    assert payload.emotion == "happy"
+    assert "Drink some water" in payload.speak

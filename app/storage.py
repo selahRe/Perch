@@ -25,24 +25,36 @@ class MetricsRepository:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     kpm_value INTEGER NOT NULL,
-                    status_label TEXT NOT NULL
+                    status_label TEXT NOT NULL,
+                    app_name TEXT
                 )
                 """
             )
+            columns = connection.execute("PRAGMA table_info(monitoring_history)").fetchall()
+            column_names = {row[1] for row in columns}
+            if "app_name" not in column_names:
+                connection.execute("ALTER TABLE monitoring_history ADD COLUMN app_name TEXT")
             connection.commit()
 
-    def save_minute_record(self, timestamp: datetime, kpm_value: int, status_label: str) -> None:
+    def save_minute_record(
+        self,
+        timestamp: datetime,
+        kpm_value: int,
+        status_label: str,
+        app_name: str | None = None,
+    ) -> None:
         with self._lock:
             with self._connect() as connection:
                 connection.execute(
                     """
-                    INSERT INTO monitoring_history (timestamp, kpm_value, status_label)
-                    VALUES (?, ?, ?)
+                    INSERT INTO monitoring_history (timestamp, kpm_value, status_label, app_name)
+                    VALUES (?, ?, ?, ?)
                     """,
                     (
                         timestamp.astimezone(timezone.utc).isoformat(),
                         kpm_value,
                         status_label,
+                        app_name,
                     ),
                 )
                 connection.commit()
@@ -69,7 +81,8 @@ class MetricsRepository:
                         id,
                         timestamp,
                         kpm_value,
-                        status_label
+                        status_label,
+                        app_name
                     FROM monitoring_history
                     WHERE timestamp >= ?
                     ORDER BY timestamp ASC

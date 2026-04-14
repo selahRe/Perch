@@ -171,12 +171,65 @@ input {
   background: var(--bg);
 }
 
+.hidden-pet-screen {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.hidden-pet-card {
+  width: min(520px, 100%);
+  padding: 26px 22px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(141, 125, 181, 0.18);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
+  text-align: center;
+}
+
+.hidden-pet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 18px;
+}
+
+.hidden-reveal-button {
+  min-width: 220px;
+}
+
 .pet-top-area {
   min-height: 140px;
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding: 20px 20px 0;
+}
+
+.monitoring-card {
+  width: min(460px, calc(100vw - 32px));
+  margin: 0 auto 16px;
+  padding: 14px 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(141, 125, 181, 0.2);
+  color: var(--purple);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.04);
+}
+
+.monitoring-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.monitoring-row {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #7e739c;
 }
 
 .pet-center-area {

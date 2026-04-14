@@ -2,6 +2,21 @@ import { create } from 'zustand';
 
 export type Screen = 'welcome' | 'username' | 'activeTime' | 'petHome';
 export type PetEmotion = 'happy' | 'eat' | 'play' | 'idle';
+export type MonitoringLabel = 'Idle' | 'Relaxed' | 'Focused';
+
+interface MonitoringState {
+  timestamp?: string;
+  kpmValue: number;
+  label: MonitoringLabel;
+  confidence: number;
+  appName?: string | null;
+  currentMinuteCount: number;
+  listenerRunning: boolean;
+  listenerError?: string | null;
+  lastKeyPressedAt?: string | null;
+  lastMinuteCompletedAt?: string | null;
+  samplingIntervalSeconds: number;
+}
 
 interface AppState {
   currentScreen: Screen;
@@ -17,12 +32,15 @@ interface AppState {
     message: string;
   };
 
+  monitoring: MonitoringState;
+
   setScreen: (screen: Screen) => void;
   setName: (name: string) => void;
   setActiveTime: (activeTime: string) => void;
   setPetMessage: (message: string) => void;
   setPetEmotion: (emotion: PetEmotion) => void;
   setPetVisible: (visible: boolean) => void;
+  setMonitoringState: (state: Partial<MonitoringState>) => void;
   finishOnboarding: () => void;
 }
 
@@ -38,6 +56,19 @@ export const useAppStore = create<AppState>((set) => ({
     visible: true,
     emotion: 'happy',
     message: 'Hi! I am Perch~',
+  },
+
+  monitoring: {
+    kpmValue: 0,
+    label: 'Idle',
+    confidence: 1,
+    appName: null,
+    currentMinuteCount: 0,
+    listenerRunning: false,
+    listenerError: null,
+    lastKeyPressedAt: null,
+    lastMinuteCompletedAt: null,
+    samplingIntervalSeconds: 60,
   },
 
   setScreen: (screen) => set({ currentScreen: screen }),
@@ -79,6 +110,14 @@ export const useAppStore = create<AppState>((set) => ({
       pet: {
         ...state.pet,
         visible,
+      },
+    })),
+
+  setMonitoringState: (statePatch) =>
+    set((state) => ({
+      monitoring: {
+        ...state.monitoring,
+        ...statePatch,
       },
     })),
 

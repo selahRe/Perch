@@ -9,6 +9,7 @@ declare global {
       onProfileLoaded: (cb: (data: any) => void) => void;
       onSettingsLoaded: (cb: (data: any) => void) => void;
       onPetUpdate: (cb: (data: any) => void) => void;
+      onMonitoringState: (cb: (data: any) => void) => void;
     };
   }
 }

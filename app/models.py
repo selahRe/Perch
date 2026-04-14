@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 StatusLabel = Literal["Idle", "Relaxed", "Focused"]
@@ -62,6 +62,8 @@ class MonitoringSettings(BaseModel):
     reminder_types: list[ReminderType] = Field(
         default_factory=lambda: ["hydration", "stretching", "meeting"]
     )
+    hydration_reminder_interval_minutes: int = 30
+    stretching_reminder_interval_minutes: int = 45
     check_interval: int = 60
     pet_visible_always: bool = True
     kpm_thresholds: dict[str, int] = Field(default_factory=lambda: {"idle": 5, "focus": 50})
@@ -74,9 +76,19 @@ class MonitoringSettings(BaseModel):
     protocol_adapter: ProtocolAdapterSettings = Field(default_factory=ProtocolAdapterSettings)
 
 
+class ReminderPreferences(BaseModel):
+    hydration: bool = True
+    stretching: bool = True
+    meetings: bool = True
+
+
 class UserProfile(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     username: str = ""
     gender: GenderType = "prefer_not_to_say"
+    free_time: str = Field(default="", alias="freeTime")
+    reminders: ReminderPreferences = Field(default_factory=ReminderPreferences)
     onboarding_completed: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -96,9 +108,16 @@ class MonitoringState(BaseModel):
     kpm_value: int
     status: StatusClassification
     app_name: str | None = None
+    current_minute_count: int = 0
+    listener_running: bool = False
+    listener_error: str | None = None
+    last_key_pressed_at: datetime | None = None
+    last_minute_completed_at: datetime | None = None
+    sampling_interval_seconds: int = 60
 
 
 class HistoryPoint(BaseModel):
     time: str
     kpm: int
     label: StatusLabel
+    app_name: str | None = None

@@ -8,6 +8,7 @@ const PYTHON_BACKEND_BASE_URL = 'http://127.0.0.1:8000'
 
 let mainWindow
 let petUpdateTimer = null
+let monitoringStateTimer = null
 
 async function apiGet(route) {
   const response = await fetch(`${PYTHON_BACKEND_BASE_URL}${route}`)
@@ -29,14 +30,35 @@ async function apiPost(route, payload) {
   return response.json()
 }
 
+async function apiGetMonitoringState() {
+  return apiGet('/monitoring/state')
+}
+
 function mapLegacyProfilePayload(input = {}) {
   if ('username' in input) {
-    return input
+    return {
+      username: input.username || '',
+      gender: input.gender || 'prefer_not_to_say',
+      freeTime: input.freeTime || input.free_time || '',
+      reminders: input.reminders || {
+        hydration: true,
+        stretching: true,
+        meetings: true,
+      },
+      onboarding_completed: input.onboarding_completed ?? true,
+      created_at: input.created_at || new Date().toISOString(),
+    }
   }
 
   return {
     username: input.name || '',
     gender: input.gender || 'prefer_not_to_say',
+    freeTime: input.freeTime || '',
+    reminders: input.reminders || {
+      hydration: true,
+      stretching: true,
+      meetings: true,
+    },
     onboarding_completed: true,
     created_at: new Date().toISOString(),
   }
@@ -61,15 +83,35 @@ function startPetUpdatePolling() {
   }, 5000)
 }
 
+function startMonitoringStatePolling() {
+  if (monitoringStateTimer) {
+    clearInterval(monitoringStateTimer)
+  }
+
+  monitoringStateTimer = setInterval(async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return
+    }
+    try {
+      const monitoringState = await apiGetMonitoringState()
+      mainWindow.webContents.send('monitoring:state', monitoringState)
+    } catch (error) {
+      console.error('[Perch] Failed to poll /monitoring/state', error)
+    }
+  }, 5000)
+}
+
 function registerIpcHandlers() {
   ipcMain.handle('app:ready', async () => {
     const bundle = await apiGet('/config/load')
     const pet = await apiGet('/pet/update')
+    const monitoringState = await apiGetMonitoringState()
 
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('profile:loaded', bundle.profile)
       mainWindow.webContents.send('settings:loaded', bundle.settings)
       mainWindow.webContents.send('pet:update', pet)
+      mainWindow.webContents.send('monitoring:state', monitoringState)
     }
 
     return { success: true }
@@ -109,6 +151,7 @@ function createWindow() {
 
   mainWindow.loadURL('http://localhost:5173')
   startPetUpdatePolling()
+  startMonitoringStatePolling()
 }
 
 app.whenReady().then(() => {
@@ -120,6 +163,10 @@ app.on('window-all-closed', () => {
   if (petUpdateTimer) {
     clearInterval(petUpdateTimer)
     petUpdateTimer = null
+  }
+  if (monitoringStateTimer) {
+    clearInterval(monitoringStateTimer)
+    monitoringStateTimer = null
   }
   if (process.platform !== 'darwin') {
     app.quit()

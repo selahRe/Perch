@@ -29,8 +29,9 @@ export default function ActiveTimeScreen() {
           meetings: true,
         },
         onboarding_completed: true,
-        created_at: new Date().toISOString(), 
-        // ?
+        created_at: new Date().toISOString(),
+      }).catch((error) => {
+        console.error('saveProfile failed', error);
       });
     }
 
