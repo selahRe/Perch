@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 
 StatusLabel = Literal["Idle", "Relaxed", "Focused"]
 PetEmotion = Literal["happy", "eat", "play", "idle"]
+GenderType = Literal["male", "female", "other", "prefer_not_to_say"]
+ReminderType = Literal["hydration", "stretching", "meeting", "custom"]
 
 
 class PetState(BaseModel):
@@ -57,6 +59,12 @@ class StatusClassification(BaseModel):
 
 
 class MonitoringSettings(BaseModel):
+    reminder_types: list[ReminderType] = Field(
+        default_factory=lambda: ["hydration", "stretching", "meeting"]
+    )
+    check_interval: int = 60
+    pet_visible_always: bool = True
+    kpm_thresholds: dict[str, int] = Field(default_factory=lambda: {"idle": 5, "focus": 50})
     idle_limit: int = 5
     focus_threshold: int = 60
     developer_apps: list[str] = Field(
@@ -64,6 +72,23 @@ class MonitoringSettings(BaseModel):
     )
     developer_focus_delta: int = 10
     protocol_adapter: ProtocolAdapterSettings = Field(default_factory=ProtocolAdapterSettings)
+
+
+class UserProfile(BaseModel):
+    username: str = ""
+    gender: GenderType = "prefer_not_to_say"
+    onboarding_completed: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ConfigBundle(BaseModel):
+    profile: UserProfile
+    settings: MonitoringSettings
+
+
+class SaveResult(BaseModel):
+    success: bool
+    message: str
 
 
 class MonitoringState(BaseModel):

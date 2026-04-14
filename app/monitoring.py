@@ -10,6 +10,7 @@ from typing import Callable
 
 from pynput import keyboard
 
+from .config_store import get_default_perch_storage_root
 from .classifier import StatusClassifier
 from .models import HistoryPoint, MonitoringSettings, MonitoringState, StatusClassification
 from .settings_store import SettingsStore
@@ -33,8 +34,9 @@ class KeyboardMonitor:
         on_minute_complete: MinuteCallback | None = None,
     ) -> None:
         project_root = Path(__file__).resolve().parents[1]
+        default_storage_root = get_default_perch_storage_root()
         self.db_path = db_path or (project_root / "perch_metrics.sqlite3")
-        self.settings_store = SettingsStore(settings_path or (project_root / "settings.json"))
+        self.settings_store = SettingsStore(settings_path or (default_storage_root / "settings.json"))
         self.classifier = StatusClassifier(self.settings_store)
         self.minute_seconds = minute_seconds
         self.repository = MetricsRepository(self.db_path)
