@@ -25,6 +25,7 @@ Endpoints:
 - `GET /monitoring/history?period=1h|24h`: historical KPM points for visualization
 - `GET /monitoring/config`: current classification thresholds
 - `PUT /monitoring/config`: update classification thresholds
+- `GET /pet/update`: protocol-adapted payload (`visible`, `emotion`, `speak`) for frontend view updates
 
 Monitoring details:
 
@@ -32,6 +33,10 @@ Monitoring details:
 - KPM is computed every 60 seconds and triggers a callback to storage/classification.
 - Data is persisted in SQLite table `monitoring_history` with 24-hour retention cleanup.
 - Thresholds are loaded from `settings.json`.
+- Pet adapter behavior is configurable in `settings.json > protocol_adapter`:
+  - Per-label output rules (`idle`, `relaxed`, `focused`, `focused_long`) for `visible`, `emotion`, and `speak` template.
+  - Long-focus thresholds (`focused_long_kpm_threshold`, `focused_long_duration_seconds`).
+  - Cooldown controls (`cooldown_seconds`, `cooldown_fallback_speak`).
 
 Note:
 
