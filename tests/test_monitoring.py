@@ -5,6 +5,7 @@ import app.main as main_module
 from app.classifier import StatusClassifier
 from app.models import MonitoringSettings, PetState
 from app.monitoring import KeyboardMonitor
+from app.protocol_adapter import PetUpdateAdapter, get_pet_update
 from app.settings_store import SettingsStore
 from app.storage import MetricsRepository
 
@@ -17,6 +18,20 @@ def write_settings(path, idle_limit=5, focus_threshold=60):
                 "focus_threshold": focus_threshold,
                 "developer_apps": ["Code"],
                 "developer_focus_delta": 10,
+                "protocol_adapter": {
+                    "focused_long_kpm_threshold": 80,
+                    "focused_long_duration_seconds": 600,
+                    "cooldown_seconds": 120,
+                    "cooldown_fallback_speak": "...",
+                    "idle": {"visible": True, "emotion": "idle", "speak": "..."},
+                    "relaxed": {"visible": True, "emotion": "happy", "speak": "Relaxed at {kpm} KPM"},
+                    "focused": {"visible": True, "emotion": "play", "speak": "Focused now"},
+                    "focused_long": {
+                        "visible": True,
+                        "emotion": "happy",
+                        "speak": "Focused for {status_duration_minutes} minutes",
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -54,6 +69,54 @@ def test_status_classifier_uses_dynamic_settings_and_dev_app_adjustment(tmp_path
     assert 0.0 <= focused_dev.confidence <= 1.0
 
 
+def test_protocol_adapter_maps_kpm_and_duration_to_pet_payload():
+    focused_long = get_pet_update(
+        status_duration_seconds=31 * 60,
+        current_kpm=110,
+        status_label="Focused",
+    )
+    idle = get_pet_update(
+        status_duration_seconds=5 * 60,
+        current_kpm=0,
+        status_label="Idle",
+    )
+
+    assert focused_long.emotion == "happy"
+    assert "focused" in focused_long.speak.lower()
+    assert idle.emotion == "idle"
+    assert idle.speak == "..."
+
+
+def test_protocol_adapter_reads_templates_and_applies_cooldown(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path)
+    adapter = PetUpdateAdapter(SettingsStore(settings_path))
+
+    first = adapter.build_update(
+        status_duration_seconds=700,
+        current_kpm=90,
+        status_label="Focused",
+        now=datetime(2026, 4, 14, 10, 0, tzinfo=timezone.utc),
+    )
+    second = adapter.build_update(
+        status_duration_seconds=705,
+        current_kpm=95,
+        status_label="Focused",
+        now=datetime(2026, 4, 14, 10, 1, tzinfo=timezone.utc),
+    )
+    after_cooldown = adapter.build_update(
+        status_duration_seconds=720,
+        current_kpm=100,
+        status_label="Focused",
+        now=datetime(2026, 4, 14, 10, 3, tzinfo=timezone.utc),
+    )
+
+    assert first.emotion == "happy"
+    assert "minutes" in first.speak
+    assert second.speak == "..."
+    assert after_cooldown.speak != "..."
+
+
 def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch):
     settings_path = tmp_path / "settings.json"
     write_settings(settings_path, idle_limit=5, focus_threshold=60)
@@ -86,6 +149,8 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     state = main_module.get_state()
     history_1h = main_module.get_monitoring_history(period="1h")
     history_24h = main_module.get_monitoring_history(period="24h")
+    monkeypatch.setattr(main_module.pet_update_adapter, "build_update", lambda **_: PetState(visible=True, emotion="happy", speak="cfg"))
+    pet_update = main_module.get_pet_update_payload()
     config = main_module.get_monitoring_config()
     updated = main_module.update_monitoring_config(
         MonitoringSettings(idle_limit=3, focus_threshold=55, developer_apps=["Code"], developer_focus_delta=10)
@@ -98,6 +163,8 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     assert history_1h[0].kpm == 45
     assert history_1h[0].label == "Relaxed"
     assert len(history_24h) == 2
+    assert pet_update.visible is True
+    assert pet_update.emotion in ["happy", "play", "idle", "eat"]
     assert config.focus_threshold == 60
     assert updated.focus_threshold == 55
     assert main_module.get_monitoring_config().focus_threshold == 55

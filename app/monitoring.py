@@ -96,6 +96,21 @@ class KeyboardMonitor:
             for row in rows
         ]
 
+    def current_status_duration_seconds(self) -> int:
+        latest = self.snapshot()
+        now = datetime.now(timezone.utc)
+        rows = self.repository.load_history(since_timestamp=now - timedelta(hours=24))
+        if not rows:
+            return 0
+
+        matched_minutes = 0
+        for row in reversed(rows):
+            if row["status_label"] != latest.status.label:
+                break
+            matched_minutes += 1
+
+        return matched_minutes * self.minute_seconds
+
     def _start_listener(self) -> None:
         try:
             self._listener = keyboard.Listener(on_press=self._on_press)

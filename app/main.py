@@ -4,9 +4,11 @@ from fastapi import FastAPI, HTTPException, Query
 
 from .models import HistoryPoint, MonitoringSettings, MonitoringState, PetState
 from .monitoring import KeyboardMonitor
+from .protocol_adapter import PetUpdateAdapter
 
 
 keyboard_monitor = KeyboardMonitor()
+pet_update_adapter = PetUpdateAdapter(keyboard_monitor.settings_store)
 
 
 @asynccontextmanager
@@ -31,6 +33,17 @@ def get_state() -> PetState:
 @app.get("/monitoring/state", response_model=MonitoringState)
 def get_monitoring_state() -> MonitoringState:
     return keyboard_monitor.snapshot()
+
+
+@app.get("/pet/update", response_model=PetState)
+def get_pet_update_payload() -> PetState:
+    state = keyboard_monitor.snapshot()
+    status_duration_seconds = keyboard_monitor.current_status_duration_seconds()
+    return pet_update_adapter.build_update(
+        status_duration_seconds=status_duration_seconds,
+        current_kpm=state.kpm_value,
+        status_label=state.status.label,
+    )
 
 
 @app.get("/monitoring/history", response_model=list[HistoryPoint])
