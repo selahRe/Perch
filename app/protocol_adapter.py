@@ -23,6 +23,10 @@ class PetUpdateAdapter:
     ) -> PetState:
         settings = self.settings_store.load().protocol_adapter
         current_time = now or datetime.now(timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        else:
+            current_time = current_time.astimezone(timezone.utc)
 
         rule = self._select_rule(
             settings=settings,
@@ -30,11 +34,15 @@ class PetUpdateAdapter:
             status_duration_seconds=status_duration_seconds,
             current_kpm=current_kpm,
         )
-        should_cooldown = self._should_apply_cooldown(
-            settings=settings,
-            status_label=status_label,
-            now=current_time,
-        )
+        should_cooldown = False
+        if settings.cooldown_seconds > 0:
+            with self._lock:
+                if self._last_spoken_at is not None and self._last_label == status_label:
+                    elapsed_seconds = (current_time - self._last_spoken_at).total_seconds()
+                    should_cooldown = elapsed_seconds < settings.cooldown_seconds
+                if not should_cooldown:
+                    self._last_spoken_at = current_time
+                    self._last_label = status_label
 
         speak = settings.cooldown_fallback_speak if should_cooldown else self._render_speak(
             rule=rule,
@@ -42,11 +50,6 @@ class PetUpdateAdapter:
             current_kpm=current_kpm,
             status_label=status_label,
         )
-
-        if not should_cooldown:
-            with self._lock:
-                self._last_spoken_at = current_time
-                self._last_label = status_label
 
         return PetState(
             visible=rule.visible,
@@ -76,22 +79,6 @@ class PetUpdateAdapter:
             return settings.relaxed
 
         return settings.idle
-
-    def _should_apply_cooldown(
-        self,
-        settings: ProtocolAdapterSettings,
-        status_label: StatusLabel,
-        now: datetime,
-    ) -> bool:
-        if settings.cooldown_seconds <= 0:
-            return False
-
-        with self._lock:
-            if self._last_spoken_at is None or self._last_label != status_label:
-                return False
-            elapsed_seconds = (now - self._last_spoken_at).total_seconds()
-
-        return elapsed_seconds < settings.cooldown_seconds
 
     def _render_speak(
         self,

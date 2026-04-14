@@ -25,21 +25,29 @@ class ProtocolAdapterSettings(BaseModel):
     focused_long_duration_seconds: int = 1800
     cooldown_seconds: int = 90
     cooldown_fallback_speak: str = "..."
-    idle: PetBehaviorRule = PetBehaviorRule(visible=True, emotion="idle", speak="...")
-    relaxed: PetBehaviorRule = PetBehaviorRule(
-        visible=True,
-        emotion="happy",
-        speak="Steady pace. You're doing well.",
+    idle: PetBehaviorRule = Field(
+        default_factory=lambda: PetBehaviorRule(visible=True, emotion="idle", speak="...")
     )
-    focused: PetBehaviorRule = PetBehaviorRule(
-        visible=True,
-        emotion="play",
-        speak="Nice focus streak. Keep going!",
+    relaxed: PetBehaviorRule = Field(
+        default_factory=lambda: PetBehaviorRule(
+            visible=True,
+            emotion="happy",
+            speak="Steady pace. You're doing well.",
+        )
     )
-    focused_long: PetBehaviorRule = PetBehaviorRule(
-        visible=True,
-        emotion="happy",
-        speak="Great job! You've been focused for {status_duration_minutes} minutes!",
+    focused: PetBehaviorRule = Field(
+        default_factory=lambda: PetBehaviorRule(
+            visible=True,
+            emotion="play",
+            speak="Nice focus streak. Keep going!",
+        )
+    )
+    focused_long: PetBehaviorRule = Field(
+        default_factory=lambda: PetBehaviorRule(
+            visible=True,
+            emotion="happy",
+            speak="Great job! You've been focused for {status_duration_minutes} minutes!",
+        )
     )
 
 
@@ -51,9 +59,11 @@ class StatusClassification(BaseModel):
 class MonitoringSettings(BaseModel):
     idle_limit: int = 5
     focus_threshold: int = 60
-    developer_apps: list[str] = ["Code", "Cursor", "IntelliJ IDEA", "PyCharm", "WebStorm"]
+    developer_apps: list[str] = Field(
+        default_factory=lambda: ["Code", "Cursor", "IntelliJ IDEA", "PyCharm", "WebStorm"]
+    )
     developer_focus_delta: int = 10
-    protocol_adapter: ProtocolAdapterSettings = ProtocolAdapterSettings()
+    protocol_adapter: ProtocolAdapterSettings = Field(default_factory=ProtocolAdapterSettings)
 
 
 class MonitoringState(BaseModel):

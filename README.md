@@ -34,9 +34,9 @@ Monitoring details:
 - Data is persisted in SQLite table `monitoring_history` with 24-hour retention cleanup.
 - Thresholds are loaded from `settings.json`.
 - Pet adapter behavior is configurable in `settings.json > protocol_adapter`:
-	- Per-label output rules (`idle`, `relaxed`, `focused`, `focused_long`) for `visible`, `emotion`, and `speak` template.
-	- Long-focus thresholds (`focused_long_kpm_threshold`, `focused_long_duration_seconds`).
-	- Cooldown controls (`cooldown_seconds`, `cooldown_fallback_speak`).
+  - Per-label output rules (`idle`, `relaxed`, `focused`, `focused_long`) for `visible`, `emotion`, and `speak` template.
+  - Long-focus thresholds (`focused_long_kpm_threshold`, `focused_long_duration_seconds`).
+  - Cooldown controls (`cooldown_seconds`, `cooldown_fallback_speak`).
 
 Note:
 

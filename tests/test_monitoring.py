@@ -138,8 +138,10 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
         kpm_value=110,
         status_label="Focused",
     )
+    adapter = PetUpdateAdapter(monitor.settings_store)
 
     monkeypatch.setattr(main_module, "keyboard_monitor", monitor)
+    monkeypatch.setattr(main_module, "pet_update_adapter", adapter)
     monkeypatch.setattr(
         main_module,
         "current_state",
@@ -149,7 +151,7 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     state = main_module.get_state()
     history_1h = main_module.get_monitoring_history(period="1h")
     history_24h = main_module.get_monitoring_history(period="24h")
-    monkeypatch.setattr(main_module.pet_update_adapter, "build_update", lambda **_: PetState(visible=True, emotion="happy", speak="cfg"))
+    monkeypatch.setattr(adapter, "build_update", lambda **_: PetState(visible=True, emotion="happy", speak="cfg"))
     pet_update = main_module.get_pet_update_payload()
     config = main_module.get_monitoring_config()
     updated = main_module.update_monitoring_config(

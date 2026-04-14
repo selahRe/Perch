@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,13 +45,13 @@ class KeyboardMonitor:
         self._listener: keyboard.Listener | None = None
         self._sampler_thread: threading.Thread | None = None
         self._current_minute_count = 0
-        self._total_key_presses = 0
         self._latest_state = MonitoringState(
             timestamp=datetime.now(timezone.utc),
             kpm_value=0,
             status=StatusClassification(label="Idle", confidence=1.0),
             app_name=None,
         )
+        self._status_started_at = self._latest_state.timestamp
         self._started = False
 
     def start(self) -> None:
@@ -96,19 +97,9 @@ class KeyboardMonitor:
         ]
 
     def current_status_duration_seconds(self) -> int:
-        latest = self.snapshot()
-        now = datetime.now(timezone.utc)
-        rows = self.repository.load_history(since_timestamp=now - timedelta(hours=24))
-        if not rows:
-            return 0
-
-        matched_minutes = 0
-        for row in reversed(rows):
-            if row["status_label"] != latest.status.label:
-                break
-            matched_minutes += 1
-
-        return matched_minutes * self.minute_seconds
+        with self._lock:
+            started_at = self._status_started_at
+        return max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))
 
     def _start_listener(self) -> None:
         try:
@@ -123,27 +114,30 @@ class KeyboardMonitor:
     def _on_press(self, _: keyboard.Key | keyboard.KeyCode | None) -> None:
         with self._lock:
             self._current_minute_count += 1
-            self._total_key_presses += 1
 
     def _sampling_loop(self) -> None:
         while not self._stop_event.wait(self.minute_seconds):
             self._complete_minute()
 
     def _complete_minute(self) -> None:
+        app_name = self._get_active_app_name()
         with self._lock:
             kpm_value = self._current_minute_count
             self._current_minute_count = 0
-            app_name = self._get_active_app_name()
+            previous_label = self._latest_state.status.label
 
         classification = self.classifier.classify(kpm_value=kpm_value, app_name=app_name)
+        timestamp = datetime.now(timezone.utc)
         state = MonitoringState(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=timestamp,
             kpm_value=kpm_value,
             status=classification,
             app_name=app_name,
         )
 
         with self._lock:
+            if classification.label != previous_label:
+                self._status_started_at = timestamp
             self._latest_state = state
 
         try:
@@ -169,6 +163,9 @@ class KeyboardMonitor:
         raise ValueError("period must be '1h' or '24h'")
 
     def _get_active_app_name(self) -> str | None:
+        if sys.platform != "darwin":
+            return None
+
         if not hasattr(subprocess, "run"):
             return None
 
