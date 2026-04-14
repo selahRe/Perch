@@ -1,14 +1,140 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
+import { spawn } from 'child_process'
+import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const PYTHON_BACKEND_BASE_URL = 'http://127.0.0.1:8000'
+const BACKEND_HOST = '127.0.0.1'
+const BACKEND_PORT = '8000'
+const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..')
+const VENV_PYTHON_PATH = path.join(WORKSPACE_ROOT, '.venv', 'bin', 'python')
 
 let mainWindow
 let petUpdateTimer = null
 let monitoringStateTimer = null
+let pythonProcess = null
+let backendManagedByElectron = false
+let isQuitting = false
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function isBackendReachable() {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 1200)
+  try {
+    const response = await fetch(`${PYTHON_BACKEND_BASE_URL}/monitoring/state`, {
+      signal: controller.signal,
+    })
+    return response.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function waitForBackendReady(maxAttempts = 30, intervalMs = 250) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (await isBackendReachable()) {
+      return true
+    }
+    await sleep(intervalMs)
+  }
+  return false
+}
+
+async function ensureBackendRunning() {
+  if (await isBackendReachable()) {
+    console.log('[Perch] Backend already running; lifecycle is externally managed.')
+    return
+  }
+
+  if (!fs.existsSync(VENV_PYTHON_PATH)) {
+    throw new Error(
+      `[Perch] Cannot find virtualenv Python at ${VENV_PYTHON_PATH}. ` +
+      'Create .venv and install backend dependencies first.'
+    )
+  }
+
+  pythonProcess = spawn(
+    VENV_PYTHON_PATH,
+    ['-m', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', BACKEND_PORT],
+    {
+      cwd: WORKSPACE_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  )
+  backendManagedByElectron = true
+
+  pythonProcess.stdout.on('data', (chunk) => {
+    process.stdout.write(`[Perch:python] ${chunk}`)
+  })
+
+  pythonProcess.stderr.on('data', (chunk) => {
+    process.stderr.write(`[Perch:python] ${chunk}`)
+  })
+
+  pythonProcess.on('exit', (code, signal) => {
+    if (!isQuitting) {
+      console.error(`[Perch] Managed Python backend exited unexpectedly (code=${code}, signal=${signal})`)
+    }
+  })
+
+  const ready = await waitForBackendReady()
+  if (!ready) {
+    throw new Error('[Perch] Managed Python backend did not become ready in time.')
+  }
+}
+
+async function stopManagedBackend() {
+  if (!backendManagedByElectron || !pythonProcess) {
+    return
+  }
+
+  const target = pythonProcess
+  pythonProcess = null
+  backendManagedByElectron = false
+
+  await new Promise((resolve) => {
+    let settled = false
+    const resolveOnce = () => {
+      if (!settled) {
+        settled = true
+        resolve()
+      }
+    }
+
+    target.once('exit', () => {
+      resolveOnce()
+    })
+
+    try {
+      target.kill('SIGTERM')
+    } catch {
+      resolveOnce()
+      return
+    }
+
+    setTimeout(() => {
+      if (!settled) {
+        try {
+          target.kill('SIGKILL')
+        } catch {
+          // Ignore if already dead.
+        }
+      }
+    }, 2500)
+
+    setTimeout(() => {
+      resolveOnce()
+    }, 5000)
+  })
+}
 
 async function apiGet(route) {
   const response = await fetch(`${PYTHON_BACKEND_BASE_URL}${route}`)
@@ -155,8 +281,27 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  registerIpcHandlers()
-  createWindow()
+  return ensureBackendRunning()
+    .then(() => {
+      registerIpcHandlers()
+      createWindow()
+    })
+    .catch((error) => {
+      console.error('[Perch] Failed to start app runtime', error)
+      app.quit()
+    })
+})
+
+app.on('before-quit', (event) => {
+  if (isQuitting) {
+    return
+  }
+
+  isQuitting = true
+  event.preventDefault()
+  stopManagedBackend().finally(() => {
+    app.quit()
+  })
 })
 
 app.on('window-all-closed', () => {
@@ -168,9 +313,7 @@ app.on('window-all-closed', () => {
     clearInterval(monitoringStateTimer)
     monitoringStateTimer = null
   }
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
+  app.quit()
 })
 
 app.on('activate', () => {
