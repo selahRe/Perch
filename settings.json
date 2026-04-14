@@ -1,4 +1,15 @@
 {
+  "reminder_types": [
+    "hydration",
+    "stretching",
+    "meeting"
+  ],
+  "check_interval": 60,
+  "pet_visible_always": true,
+  "kpm_thresholds": {
+    "idle": 5,
+    "focus": 50
+  },
   "idle_limit": 5,
   "focus_threshold": 60,
   "developer_apps": [

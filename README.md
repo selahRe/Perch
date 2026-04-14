@@ -26,13 +26,17 @@ Endpoints:
 - `GET /monitoring/config`: current classification thresholds
 - `PUT /monitoring/config`: update classification thresholds
 - `GET /pet/update`: protocol-adapted payload (`visible`, `emotion`, `speak`) for frontend view updates
+- `GET /config/load`: load onboarding profile and settings bundle
+- `POST /config/save-profile`: save onboarding profile JSON
+- `POST /config/save-settings`: save settings JSON
 
 Monitoring details:
 
 - Global key events are captured by a non-blocking listener.
 - KPM is computed every 60 seconds and triggers a callback to storage/classification.
 - Data is persisted in SQLite table `monitoring_history` with 24-hour retention cleanup.
-- Thresholds are loaded from `settings.json`.
+- Thresholds and pet adapter behavior are loaded from `~/.perch/settings.json` (or `~/Documents/.perch/settings.json` when available).
+- `~/.perch/profile.json` stores onboarding data.
 - Pet adapter behavior is configurable in `settings.json > protocol_adapter`:
   - Per-label output rules (`idle`, `relaxed`, `focused`, `focused_long`) for `visible`, `emotion`, and `speak` template.
   - Long-focus thresholds (`focused_long_kpm_threshold`, `focused_long_duration_seconds`).
