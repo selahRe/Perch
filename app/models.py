@@ -1,10 +1,10 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
-BehaviorState = Literal["focused", "relaxed", "idle"]
+StatusLabel = Literal["Idle", "Relaxed", "Focused"]
 
 
 class PetState(BaseModel):
@@ -13,19 +13,26 @@ class PetState(BaseModel):
     speak: str = ""
 
 
-class MonitoringSnapshot(BaseModel):
-    captured_at: datetime
+class StatusClassification(BaseModel):
+    label: StatusLabel
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class MonitoringSettings(BaseModel):
+    idle_limit: int = 5
+    focus_threshold: int = 60
+    developer_apps: list[str] = ["Code", "Cursor", "IntelliJ IDEA", "PyCharm", "WebStorm"]
+    developer_focus_delta: int = 10
+
+
+class MonitoringState(BaseModel):
+    timestamp: datetime
+    kpm_value: int
+    status: StatusClassification
+    app_name: str | None = None
+
+
+class HistoryPoint(BaseModel):
+    time: str
     kpm: int
-    behavior_state: BehaviorState
-    key_presses_last_minute: int
-    total_key_presses: int
-    window_seconds: int = 60
-
-
-class MonitoringConfig(BaseModel):
-    idle_kpm_threshold: int = 0
-    focused_kpm_threshold: int = 120
-
-
-class MonitoringHistoryResponse(BaseModel):
-    items: list[MonitoringSnapshot]
+    label: StatusLabel

@@ -1,50 +1,56 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
-from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from pynput import keyboard
 
-from .models import BehaviorState, MonitoringConfig, MonitoringSnapshot
+from .classifier import StatusClassifier
+from .models import HistoryPoint, MonitoringSettings, MonitoringState, StatusClassification
+from .settings_store import SettingsStore
 from .storage import MetricsRepository
 
 
 LOGGER = logging.getLogger(__name__)
 
-WINDOW_SECONDS = 60
-SAMPLE_INTERVAL_SECONDS = 5
-FOCUSED_KPM_THRESHOLD = 120
-IDLE_KPM_THRESHOLD = 0
+MINUTE_SECONDS = 60
+RETENTION_HOURS = 24
+
+MinuteCallback = Callable[[MonitoringState], None]
 
 
 class KeyboardMonitor:
     def __init__(
         self,
         db_path: Path | None = None,
-        window_seconds: int = WINDOW_SECONDS,
-        sample_interval_seconds: int = SAMPLE_INTERVAL_SECONDS,
-        focused_threshold: int = FOCUSED_KPM_THRESHOLD,
-        idle_threshold: int = IDLE_KPM_THRESHOLD,
+        settings_path: Path | None = None,
+        minute_seconds: int = MINUTE_SECONDS,
+        on_minute_complete: MinuteCallback | None = None,
     ) -> None:
         project_root = Path(__file__).resolve().parents[1]
         self.db_path = db_path or (project_root / "perch_metrics.sqlite3")
-        self.window_seconds = window_seconds
-        self.sample_interval_seconds = sample_interval_seconds
-        self._config = MonitoringConfig(
-            idle_kpm_threshold=idle_threshold,
-            focused_kpm_threshold=focused_threshold,
-        )
+        self.settings_store = SettingsStore(settings_path or (project_root / "settings.json"))
+        self.classifier = StatusClassifier(self.settings_store)
+        self.minute_seconds = minute_seconds
         self.repository = MetricsRepository(self.db_path)
+        self.on_minute_complete = on_minute_complete or self._default_minute_callback
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._listener: keyboard.Listener | None = None
         self._sampler_thread: threading.Thread | None = None
-        self._key_timestamps: deque[float] = deque()
+        self._current_minute_count = 0
         self._total_key_presses = 0
+        self._latest_state = MonitoringState(
+            timestamp=datetime.now(timezone.utc),
+            kpm_value=0,
+            status=StatusClassification(label="Idle", confidence=1.0),
+            app_name=None,
+        )
         self._started = False
 
     def start(self) -> None:
@@ -56,7 +62,7 @@ class KeyboardMonitor:
         self._sampler_thread = threading.Thread(target=self._sampling_loop, daemon=True)
         self._sampler_thread.start()
         self._started = True
-        self._persist_snapshot()
+        self._complete_minute()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -68,31 +74,27 @@ class KeyboardMonitor:
             self._listener = None
         self._started = False
 
-    def snapshot(self) -> MonitoringSnapshot:
+    def snapshot(self) -> MonitoringState:
         with self._lock:
-            self._trim_old_keys_locked()
-            key_presses_last_minute = len(self._key_timestamps)
-            kpm = key_presses_last_minute
-            behavior_state = self._classify(kpm)
-            total_key_presses = self._total_key_presses
+            return self._latest_state.model_copy()
 
-        return MonitoringSnapshot(
-            captured_at=datetime.now(timezone.utc),
-            kpm=kpm,
-            behavior_state=behavior_state,
-            key_presses_last_minute=key_presses_last_minute,
-            total_key_presses=total_key_presses,
-            window_seconds=self.window_seconds,
-        )
+    def config(self) -> MonitoringSettings:
+        return self.settings_store.load()
 
-    def config(self) -> MonitoringConfig:
-        with self._lock:
-            return self._config.model_copy()
+    def update_config(self, config: MonitoringSettings) -> MonitoringSettings:
+        return self.settings_store.save(config)
 
-    def update_config(self, config: MonitoringConfig) -> MonitoringConfig:
-        with self._lock:
-            self._config = config.model_copy()
-            return self._config.model_copy()
+    def history(self, period: str = "1h") -> list[HistoryPoint]:
+        since = self._parse_period(period)
+        rows = self.repository.load_history(since_timestamp=since)
+        return [
+            HistoryPoint(
+                time=datetime.fromisoformat(row["timestamp"]).astimezone().strftime("%H:%M"),
+                kpm=row["kpm_value"],
+                label=row["status_label"],
+            )
+            for row in rows
+        ]
 
     def _start_listener(self) -> None:
         try:
@@ -106,31 +108,69 @@ class KeyboardMonitor:
 
     def _on_press(self, _: keyboard.Key | keyboard.KeyCode | None) -> None:
         with self._lock:
-            timestamp = datetime.now(timezone.utc).timestamp()
-            self._key_timestamps.append(timestamp)
+            self._current_minute_count += 1
             self._total_key_presses += 1
-            self._trim_old_keys_locked(timestamp)
-
-    def _trim_old_keys_locked(self, now_timestamp: float | None = None) -> None:
-        current_timestamp = now_timestamp or datetime.now(timezone.utc).timestamp()
-        cutoff = current_timestamp - self.window_seconds
-        while self._key_timestamps and self._key_timestamps[0] < cutoff:
-            self._key_timestamps.popleft()
-
-    def _classify(self, kpm: int) -> BehaviorState:
-        if kpm <= self._config.idle_kpm_threshold:
-            return "idle"
-        if kpm >= self._config.focused_kpm_threshold:
-            return "focused"
-        return "relaxed"
 
     def _sampling_loop(self) -> None:
-        while not self._stop_event.wait(self.sample_interval_seconds):
-            self._persist_snapshot()
+        while not self._stop_event.wait(self.minute_seconds):
+            self._complete_minute()
 
-    def _persist_snapshot(self) -> None:
-        snapshot = self.snapshot()
+    def _complete_minute(self) -> None:
+        with self._lock:
+            kpm_value = self._current_minute_count
+            self._current_minute_count = 0
+            app_name = self._get_active_app_name()
+
+        classification = self.classifier.classify(kpm_value=kpm_value, app_name=app_name)
+        state = MonitoringState(
+            timestamp=datetime.now(timezone.utc),
+            kpm_value=kpm_value,
+            status=classification,
+            app_name=app_name,
+        )
+
+        with self._lock:
+            self._latest_state = state
+
         try:
-            self.repository.save_snapshot(snapshot)
+            self.on_minute_complete(state)
         except Exception:
-            LOGGER.exception("Failed to persist keyboard metrics snapshot")
+            LOGGER.exception("Failed to process 60-second monitoring callback")
+
+    def _default_minute_callback(self, state: MonitoringState) -> None:
+        self.repository.save_minute_record(
+            timestamp=state.timestamp,
+            kpm_value=state.kpm_value,
+            status_label=state.status.label,
+        )
+        self.repository.cleanup_older_than(hours=RETENTION_HOURS)
+
+    def _parse_period(self, period: str) -> datetime:
+        normalized = period.strip().lower()
+        now = datetime.now(timezone.utc)
+        if normalized == "1h":
+            return now - timedelta(hours=1)
+        if normalized == "24h":
+            return now - timedelta(hours=24)
+        raise ValueError("period must be '1h' or '24h'")
+
+    def _get_active_app_name(self) -> str | None:
+        if not hasattr(subprocess, "run"):
+            return None
+
+        try:
+            script = (
+                'tell application "System Events" to '
+                'get name of first process whose frontmost is true'
+            )
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+            app_name = result.stdout.strip()
+            return app_name or None
+        except Exception:
+            return None

@@ -21,10 +21,17 @@ Run:
 Endpoints:
 
 - `GET /state`: current pet UI state
-- `GET /monitoring/state`: current KPM and behavior classification
-- `GET /monitoring/history?limit=60`: historical KPM snapshots for charts
+- `GET /monitoring/state`: latest completed 60-second KPM and classification
+- `GET /monitoring/history?period=1h|24h`: historical KPM points for visualization
 - `GET /monitoring/config`: current classification thresholds
 - `PUT /monitoring/config`: update classification thresholds
+
+Monitoring details:
+
+- Global key events are captured by a non-blocking listener.
+- KPM is computed every 60 seconds and triggers a callback to storage/classification.
+- Data is persisted in SQLite table `monitoring_history` with 24-hour retention cleanup.
+- Thresholds are loaded from `settings.json`.
 
 Note:
 

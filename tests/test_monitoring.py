@@ -1,66 +1,79 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 
 import app.main as main_module
-from app.models import BehaviorState, MonitoringConfig, MonitoringSnapshot, PetState
+from app.classifier import StatusClassifier
+from app.models import MonitoringSettings, PetState
 from app.monitoring import KeyboardMonitor
+from app.settings_store import SettingsStore
 from app.storage import MetricsRepository
 
 
-def make_snapshot(
-    captured_at: datetime,
-    kpm: int,
-    behavior_state: BehaviorState,
-    total_key_presses: int,
-) -> MonitoringSnapshot:
-    return MonitoringSnapshot(
-        captured_at=captured_at,
-        kpm=kpm,
-        behavior_state=behavior_state,
-        key_presses_last_minute=kpm,
-        total_key_presses=total_key_presses,
-        window_seconds=60,
+def write_settings(path, idle_limit=5, focus_threshold=60):
+    path.write_text(
+        json.dumps(
+            {
+                "idle_limit": idle_limit,
+                "focus_threshold": focus_threshold,
+                "developer_apps": ["Code"],
+                "developer_focus_delta": 10,
+            }
+        ),
+        encoding="utf-8",
     )
 
 
-def test_repository_returns_snapshots_in_chronological_order(tmp_path):
+def test_repository_ttl_cleanup_and_order(tmp_path):
     repository = MetricsRepository(tmp_path / "metrics.sqlite3")
-    first = make_snapshot(datetime(2026, 4, 14, 14, 0, tzinfo=timezone.utc), 1, "relaxed", 1)
-    second = make_snapshot(datetime(2026, 4, 14, 14, 1, tzinfo=timezone.utc), 3, "focused", 3)
+    old_time = datetime.now(timezone.utc) - timedelta(hours=25)
+    new_time = datetime.now(timezone.utc) - timedelta(minutes=10)
 
-    repository.save_snapshot(first)
-    repository.save_snapshot(second)
+    repository.save_minute_record(timestamp=old_time, kpm_value=2, status_label="Idle")
+    repository.save_minute_record(timestamp=new_time, kpm_value=40, status_label="Relaxed")
+    repository.cleanup_older_than(hours=24)
 
-    items = repository.load_recent_snapshots(limit=10)
+    rows = repository.load_history(datetime.now(timezone.utc) - timedelta(hours=24))
 
-    assert [item.kpm for item in items] == [1, 3]
-    assert [item.behavior_state for item in items] == ["relaxed", "focused"]
-
-
-def test_keyboard_monitor_classifies_idle_relaxed_and_focused(tmp_path):
-    monitor = KeyboardMonitor(db_path=tmp_path / "metrics.sqlite3", sample_interval_seconds=9999)
-    monitor.update_config(MonitoringConfig(idle_kpm_threshold=0, focused_kpm_threshold=3))
-
-    assert monitor.snapshot().behavior_state == "idle"
-
-    monitor._on_press(None)
-    monitor._on_press(None)
-    assert monitor.snapshot().behavior_state == "relaxed"
-
-    monitor._on_press(None)
-    snapshot = monitor.snapshot()
-
-    assert snapshot.kpm == 3
-    assert snapshot.behavior_state == "focused"
-    assert snapshot.total_key_presses == 3
+    assert len(rows) == 1
+    assert rows[0]["kpm_value"] == 40
+    assert rows[0]["status_label"] == "Relaxed"
 
 
-def test_route_helpers_return_monitoring_state_and_history(tmp_path, monkeypatch):
-    monitor = KeyboardMonitor(db_path=tmp_path / "metrics.sqlite3", sample_interval_seconds=9999)
+def test_status_classifier_uses_dynamic_settings_and_dev_app_adjustment(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path, idle_limit=5, focus_threshold=60)
+    classifier = StatusClassifier(SettingsStore(settings_path))
+
+    idle = classifier.classify(kpm_value=3, app_name="Notes")
+    relaxed = classifier.classify(kpm_value=30, app_name="Notes")
+    focused_dev = classifier.classify(kpm_value=50, app_name="Code")
+
+    assert idle.label == "Idle"
+    assert relaxed.label == "Relaxed"
+    assert focused_dev.label == "Focused"
+    assert 0.0 <= focused_dev.confidence <= 1.0
+
+
+def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path, idle_limit=5, focus_threshold=60)
+    monitor = KeyboardMonitor(
+        db_path=tmp_path / "metrics.sqlite3",
+        settings_path=settings_path,
+        minute_seconds=9999,
+    )
     monitor.start = lambda: None
     monitor.stop = lambda: None
 
-    monitor.repository.save_snapshot(
-        make_snapshot(datetime(2026, 4, 14, 14, 2, tzinfo=timezone.utc), 7, "focused", 7)
+    monitor.repository.save_minute_record(
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=30),
+        kpm_value=45,
+        status_label="Relaxed",
+    )
+    monitor.repository.save_minute_record(
+        timestamp=datetime.now(timezone.utc) - timedelta(hours=3),
+        kpm_value=110,
+        status_label="Focused",
     )
 
     monkeypatch.setattr(main_module, "keyboard_monitor", monitor)
@@ -71,17 +84,20 @@ def test_route_helpers_return_monitoring_state_and_history(tmp_path, monkeypatch
     )
 
     state = main_module.get_state()
-    history = main_module.get_monitoring_history(limit=1)
+    history_1h = main_module.get_monitoring_history(period="1h")
+    history_24h = main_module.get_monitoring_history(period="24h")
     config = main_module.get_monitoring_config()
     updated = main_module.update_monitoring_config(
-        MonitoringConfig(idle_kpm_threshold=0, focused_kpm_threshold=5)
+        MonitoringSettings(idle_limit=3, focus_threshold=55, developer_apps=["Code"], developer_focus_delta=10)
     )
 
     assert state.visible is False
     assert state.emotion == "play"
     assert state.speak == "go"
-    assert len(history.items) == 1
-    assert history.items[0].kpm == 7
-    assert config.focused_kpm_threshold == 120
-    assert updated.focused_kpm_threshold == 5
-    assert main_module.get_monitoring_config().focused_kpm_threshold == 5
+    assert len(history_1h) == 1
+    assert history_1h[0].kpm == 45
+    assert history_1h[0].label == "Relaxed"
+    assert len(history_24h) == 2
+    assert config.focus_threshold == 60
+    assert updated.focus_threshold == 55
+    assert main_module.get_monitoring_config().focus_threshold == 55
