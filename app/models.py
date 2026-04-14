@@ -62,6 +62,8 @@ class MonitoringSettings(BaseModel):
     reminder_types: list[ReminderType] = Field(
         default_factory=lambda: ["hydration", "stretching", "meeting"]
     )
+    hydration_reminder_interval_minutes: int = 30
+    stretching_reminder_interval_minutes: int = 45
     check_interval: int = 60
     pet_visible_always: bool = True
     kpm_thresholds: dict[str, int] = Field(default_factory=lambda: {"idle": 5, "focus": 50})
