@@ -1,0 +1,671 @@
+
+perch技术文档汇总
+先前大致设定
+Ai桌面宠物
+一只猫在桌面上根据用户的工作时间的输入，选择状态进行智能互动，他会弹出对话框和主人互动。用ai判断桌宠是否出现。
+功能：
+前端api：
+宠物显示/隐藏
+宠物情绪图切换：happy / eat / play（默认 happy）
+对话框显示/隐藏
+对话框内容：有字 / 无字（空字符串就是无字）
+后端：
+监控用户工作状态
+调用AI API
+处理AI返回的决策
+保存用户数据到本地
+定时检查是否该提醒
+ 
+ 
+Electron应用（一个程序）
+            ┌─────────────────────┐
+            │  界面层 (React/HTML) │
+            │  逻辑层 (Node.js)        │ ←→ AI API (DeepSeek)
+            │  数据层 (本地文件)   │
+            └─────────────────────┘
+         所有代码都在用户电脑上运行
+┌─────────────────────────────────────┐
+│   渲染进程 (Renderer Process)            │  ← "前端"
+│   - 运行在浏览器环境                      │
+│   - 负责UI显示                           │
+│   - React/HTML/CSS                      │
+│   - 不能直接访问系统API                   │
+└─────────────────────────────────────┘
+                  ↕ (IPC通信)
+┌─────────────────────────────────────┐
+│   主进程 (Main Process)                  │  ← "后端"
+│   - 运行在Node.js环境                    │
+│   - 负责业务逻辑                          │
+│   - 可以访问文件系统、系统API              │
+│   - 可以调用AI API                       │
+└─────────────────────────────────────┘
+src/renderer/
+├── index.html              # 主窗口HTML
+├── App.jsx                 # React主组件（如果用React）
+├── components/
+│   ├── Pet.jsx             # 宠物动画组件
+│   ├── ChatBubble.jsx  # 对话气泡组件
+│   └── Settings.jsx        # 设置界面
+├── styles/
+│   └── main.css            # 样式文件
+└── renderer.js             # 渲染进程入口
+src/main/
+├── main.js                  # Electron主进程入口
+├── modules/
+│   ├── contextCollector.js   # 情境数据采集
+│   ├── aiEngine.js               # AI决策引擎
+│   ├── storage.js                # 本地数据存储
+│   └── scheduler.js              # 定时任务
+└── utils/
+        └── logger.js            # 日志工具
+ 
+前端功能
+🧩 一、核心前端功能（MVP必须做）
+这是你一定要实现的，不然项目跑不起来。
+1️⃣ 桌宠本体（Pet UI）
+功能点：
+显示/隐藏宠物
+可拖拽移动（桌面自由位置）
+始终悬浮（Electron窗口置顶）
+切换状态动画：
+happy（默认）
+eat
+play
+👉 前端实现本质：
+<Pet state="happy" visible={true} />
+2️⃣ 对话气泡（ChatBubble）
+功能点：
+显示 / 隐藏
+显示文本（AI返回 or 固定文案）
+空字符串 = 不显示内容
+👉 实际就是：
+<ChatBubble text="该休息啦～" visible={true} />
+3️⃣ AI触发后的UI变化（核心交互）
+前端不负责AI，但要响应AI结果
+你要做的：
+接收后端指令（IPC）
+更新UI状态：
+AI决策
+前端行为
+appear
+显示宠物
+disappear
+隐藏
+emotion=play
+切换动画
+speak="xxx"
+显示气泡
+👉 本质是一个状态管理：
+{
+ visible: true,
+ emotion: "play",
+ message: "来玩吧！"
+}
+4️⃣ 初始化问卷（Onboarding UI）
+必须做（你们项目重点）：
+页面流程：
+欢迎语
+起名字
+性别（male / female / other / prefer not to say）
+空闲时间
+是否开启提醒（多选）
+👉 前端形式：
+多step表单（Stepper）
+或一个聊天式UI（更高级）
+5️⃣ 设置界面（Settings）
+功能：
+修改用户信息
+控制功能开关（提醒 / 数据收集）
+打开：
+👉 “How AI works”说明页
+👉 重点：
+你之前设计里提到：
+header不要显示，放到setting里
+🎮 二、增强交互功能（加分项 / demo亮点）
+这些是你可以拉开差距的
+6️⃣ 喂猫系统（Feed Interaction）
+功能：
+点击按钮 → 选择猫粮
+猫切换到 eat 状态
+显示反馈（开心/普通）
+7️⃣ 玩耍系统（Play Interaction）
+功能：
+选择玩具
+猫切换 play 状态
+有反馈动画
+8️⃣ 日程提醒 UI（Calendar Interaction）
+功能：
+输入日程（简单表单即可）
+到时间 → 弹出提醒气泡
+👉 MVP可以做成：
+不用完整日历
+只要输入 + trigger
+9️⃣ “AI解释按钮”（Explainability）
+功能：
+点击按钮
+打开说明弹窗：
+AI如何判断你在忙
+为什么出现
+👉 这个很加分（responsible AI）
+API1.0
+Perch MVP 前后端接口文档（IPC API）
+1. 目标
+本接口文档用于约定：
+前端如何接收后端 AI/调度结果并更新 UI
+前端如何把用户问卷和设置数据提交给后端保存
+前后端之间的最小可运行通信格式
+🧩 这版API实现的功能范围（MVP）
+1️⃣ 桌宠控制（核心）
+👉 后端可以直接控制桌宠行为
+显示 / 隐藏宠物
+切换状态：
+happy
+eat
+play
+控制是否说话（气泡）
+📌 本质：
+👉 一个 pet:update 就能驱动整个桌宠
+2️⃣ 对话气泡系统
+👉 后端决定说什么，前端负责展示
+显示文本
+隐藏文本（空字符串）
+跟随宠物状态同步出现
+3️⃣ AI驱动交互（核心能力）
+👉 让桌宠“看起来有智能”
+后端输出：
+{
+ "visible": true,
+ "emotion": "play",
+ "speak": "来玩吧！"
+}
+前端自动变成：
+宠物出现
+切换到 play 状态
+显示气泡
+📌 一句话总结：
+👉 AI决策 → UI自动变化
+4️⃣ 初始化问卷（Onboarding）
+👉 前端收集，后端保存
+包括：
+用户名字
+性别
+空闲时间
+提醒偏好（喝水/拉伸/会议）
+📌 用于后续 AI 行为判断
+5️⃣ 设置系统（Settings）
+👉 用户可控制功能开关
+是否开启提醒
+是否允许数据收集
+查看 “How AI works”
+6️⃣ 用户数据管理
+👉 前后端协作
+支持：
+保存用户信息（profile）
+加载用户信息
+保存设置（settings）
+加载设置
+7️⃣ 提醒系统（基础版）
+👉 后端触发，前端展示
+喝水提醒
+拉伸提醒
+日程提醒
+📌 实现方式：
+👉 本质还是 pet:update + 一句提醒话
+8️⃣ 用户互动（基础交互）
+👉 前端 → 后端
+支持：
+喂猫（feed）
+玩耍（play）
+📌 用于：
+后端记录行为
+后续做个性化（可选）
+2. 架构约定
+通信方式
+使用 Electron IPC：
+后端：Electron main process
+前端：Electron renderer process
+约定原则
+后端负责决策
+是否出现
+说什么
+当前情绪状态
+是否触发提醒
+前端负责展示
+显示/隐藏宠物
+切换动画状态
+显示/隐藏气泡
+渲染问卷和设置页
+前端不直接访问系统 API
+所有系统、存储、AI 相关逻辑走主进程
+3. 统一状态模型
+前端内部维护一个统一 UI 状态：
+{
+ "petVisible": true,
+ "petState": "happy",
+ "chatVisible": true,
+ "message": "该休息啦～",
+ "userProfile": {
+   "name": "Chloe",
+   "gender": "female",
+   "freeTime": "20:00-22:00",
+   "reminders": {
+     "hydration": true,
+     "stretching": false,
+     "meetings": true
+   }
+ },
+ "settings": {
+   "reminderEnabled": true,
+   "dataCollectionEnabled": true
+ }
+}
+4. IPC 通道设计总览
+后端 → 前端
+4.1 pet:update
+用于更新桌宠显示状态、情绪、气泡文本。
+这是最核心事件。
+4.2 reminder:trigger
+用于触发提醒气泡。
+如果你们想精简，其实可以并入 pet:update。
+4.3 settings:loaded
+后端把已保存的用户设置发给前端。
+4.4 profile:loaded
+后端把已保存的 onboarding 信息发给前端。
+前端 → 后端
+4.5 profile:save
+保存初始化问卷信息。
+4.6 settings:save
+保存设置页信息。
+4.7 pet:interaction
+前端主动告诉后端用户点击了喂猫/玩耍。
+4.8 app:ready
+前端启动完成，请求后端下发初始数据。
+5. 详细接口定义
+5.1 app:ready
+方向
+前端 → 后端
+作用
+前端启动完成后通知后端，后端随后返回：
+用户 profile
+用户 settings
+当前宠物初始状态
+请求体
+{
+ "timestamp": 1710000000000
+}
+返回方式
+后端收到后，通过以下事件推送给前端：
+profile:loaded
+settings:loaded
+pet:update
+5.2 profile:save
+方向
+前端 → 后端
+作用
+保存 onboarding 问卷结果。
+请求体
+{
+ "name": "Chloe",
+ "gender": "female",
+ "freeTime": "20:00-22:00",
+ "reminders": {
+   "hydration": true,
+   "stretching": false,
+   "meetings": true
+ }
+}
+字段说明
+字段
+类型
+必填
+说明
+name
+string
+是
+用户给自己填写的名字
+gender
+string
+是
+male / female / other / prefer_not_to_say
+freeTime
+string
+是
+用户空闲时间，MVP 先直接存字符串
+reminders
+object
+是
+提醒偏好开关
+后端返回
+建议用 profile:save:result
+{
+ "success": true,
+ "message": "profile saved"
+}
+5.3 profile:loaded
+方向
+后端 → 前端
+作用
+应用启动时返回已保存的 onboarding 信息。
+数据体
+{
+ "name": "Chloe",
+ "gender": "female",
+ "freeTime": "20:00-22:00",
+ "reminders": {
+   "hydration": true,
+   "stretching": false,
+   "meetings": true
+ }
+}
+5.4 settings:save
+方向
+前端 → 后端
+作用
+保存设置页开关和用户信息修改。
+请求体
+{
+ "reminderEnabled": true,
+ "dataCollectionEnabled": true,
+ "showHowAiWorks": false
+}
+字段说明
+字段
+类型
+必填
+说明
+reminderEnabled
+boolean
+是
+是否开启提醒
+dataCollectionEnabled
+boolean
+是
+是否允许数据收集
+showHowAiWorks
+boolean
+否
+这个更像前端本地 UI 状态，可不存
+后端返回
+建议用 settings:save:result
+{
+ "success": true,
+ "message": "settings saved"
+}
+5.5 settings:loaded
+方向
+后端 → 前端
+作用
+应用启动时返回设置数据。
+数据体
+{
+ "reminderEnabled": true,
+ "dataCollectionEnabled": true
+}
+5.6 pet:update （最重要）
+方向
+后端 → 前端
+作用
+AI 或调度器给出结果后，前端根据这个事件更新 UI。
+你们 MVP 最核心就靠这个事件跑通。
+数据体
+{
+ "visible": true,
+ "emotion": "play",
+ "speak": "来玩吧！",
+ "reason": "user_is_idle",
+ "durationMs": 5000
+}
+字段说明
+字段
+类型
+必填
+说明
+visible
+boolean
+是
+是否显示宠物
+emotion
+string
+是
+happy / eat / play
+speak
+string
+否
+气泡内容；空字符串表示不显示
+reason
+string
+否
+触发原因，方便日志和调试
+durationMs
+number
+否
+本次状态持续多久，前端可选是否处理
+前端处理规则
+条件
+前端行为
+visible = true
+显示宠物
+visible = false
+隐藏宠物
+emotion = happy/eat/play
+切换宠物状态动画
+speak != ""
+显示气泡
+speak == ""
+隐藏气泡
+示例 1：出现并说话
+{
+ "visible": true,
+ "emotion": "happy",
+ "speak": "你好呀～"
+}
+示例 2：隐藏
+{
+ "visible": false,
+ "emotion": "happy",
+ "speak": ""
+}
+示例 3：提醒
+{
+ "visible": true,
+ "emotion": "play",
+ "speak": "该站起来活动一下啦～",
+ "reason": "stretch_reminder"
+}
+5.7 reminder:trigger
+方向
+后端 → 前端
+作用
+用于单独触发提醒。
+但说实话，MVP 可以不要这个，直接复用 pet:update 就够了。
+数据体
+{
+ "type": "hydration",
+ "message": "该喝水啦～",
+ "emotion": "happy"
+}
+type 可选值
+hydration
+stretching
+meeting
+custom
+5.8 pet:interaction
+方向
+前端 → 后端
+作用
+告诉后端用户做了互动操作，比如喂猫、玩耍。
+MVP 就算后端先不处理，也先把接口定出来。
+请求体
+{
+ "action": "feed",
+ "item": "cat_food",
+ "timestamp": 1710000000000
+}
+action 可选值
+feed
+play
+示例 2
+{
+ "action": "play",
+ "item": "toy_ball",
+ "timestamp": 1710000000000
+}
+后端返回
+建议：
+{
+ "success": true
+}
+或者后端直接再发一个 pet:update：
+{
+ "visible": true,
+ "emotion": "eat",
+ "speak": "谢谢投喂！"
+}
+6. 推荐的前端 preload API
+你可以跟后端同学约定，preload 层暴露成这种形式：
+window.electronAPI = {
+ sendAppReady(),
+ saveProfile(profile),
+ saveSettings(settings),
+ sendPetInteraction(data),
+ onProfileLoaded(callback),
+ onSettingsLoaded(callback),
+ onPetUpdate(callback),
+ onReminderTrigger(callback)
+}
+更具体一点：
+window.electronAPI.sendAppReady()
+window.electronAPI.saveProfile(profile)
+window.electronAPI.saveSettings(settings)
+window.electronAPI.sendPetInteraction({ action: 'feed', item: 'cat_food' })
+window.electronAPI.onPetUpdate((data) => {
+ // 更新 visible / emotion / speak
+})
+7. MVP 最小闭环
+你跟后端同学只要先打通这 4 个，就能跑：
+前端发
+app:ready
+profile:save
+settings:save
+后端发
+profile:loaded
+settings:loaded
+pet:update
+实际上 pet:update 是唯一真正必须打通的实时事件。
+8. 建议的错误处理格式
+所有保存类接口统一返回：
+{
+ "success": false,
+ "message": "failed to save profile",
+ "errorCode": "PROFILE_SAVE_ERROR"
+}
+9. 字段枚举统一约定
+emotion
+happy
+eat
+play
+gender
+male
+female
+other
+prefer_not_to_say
+reminder type
+hydration
+stretching
+meeting
+custom
+interaction action
+feed
+play
+tips
+前端这边 MVP 先约定一个核心实时事件 pet:update。
+后端只要在 main process 里根据 AI / 定时器 / 用户状态计算出结果后，
+通过 IPC 给前端发：
+{
+ visible: boolean,
+ emotion: "happy" | "eat" | "play",
+ speak: string
+}
+前端收到后只负责：
+1. visible 控制宠物显示隐藏
+2. emotion 控制宠物状态切换
+3. speak 控制气泡显示内容；空字符串就隐藏
+另外前端会提供两个保存接口：
+- profile:save 保存 onboarding
+- settings:save 保存设置
+前端启动时会发 app:ready，
+后端可回传：
+- profile:loaded
+- settings:loaded
+- pet:update
+tech version
+1. Node: v20
+2. 包管理器: npm
+3. 直接用同一个 package.json
+4. Electron 版本跟 package.json 保持一致
+前端设计
+一、最稳妥版本的前端架构
+1. 技术选型
+直接用这套：
+React
+TypeScript
+Zustand（轻量状态管理，简单）
+CSS Modules 或普通 CSS
+Electron preload 暴露 API
+不要加：
+Redux
+React Router
+复杂表单库
+复杂动画库
+因为你这个项目本质上不是网站，而是一个桌面挂件 UI。
+src/renderer/
+├── App.tsx
+├── main.tsx
+├── components/
+│   ├── Pet.tsx
+│   ├── ChatBubble.tsx
+│   ├── OnboardingModal.tsx
+│   └── SettingsPanel.tsx
+├── store/
+│   └── useAppStore.ts
+├── services/
+│   └── electronAPI.ts
+├── types/
+│   └── ipc.ts
+└── styles/
+    └── main.css
+二、最容易落地的模块划分
+App.tsx
+主控组件，负责：
+启动时发送 app:ready
+注册 IPC 监听
+决定显示哪些 UI
+挂载宠物、气泡、问卷、设置
+Pet.tsx
+负责：
+显示 / 隐藏宠物
+根据 happy / eat / play 切图
+提供两个按钮：
+feed
+play
+这个组件不要承担业务逻辑，只管显示。
+ChatBubble.tsx
+负责：
+有文字就显示
+空字符串就隐藏
+文档里已经定了：speak == "" 就隐藏。
+OnboardingModal.tsx
+负责：
+输入名字
+选择 gender
+输入 freeTime
+勾选 reminders
+点保存后发 profile:save
+先做成一个简单弹窗表单，不要拆多步 wizard。
+单页表单最省事。
+SettingsPanel.tsx
+负责：
+开关 reminderEnabled
+开关 dataCollectionEnabled
+一个 “How AI works” 按钮或说明区
+先做成一个简单侧边栏或弹窗即可。
