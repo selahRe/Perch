@@ -54,6 +54,14 @@ class PetDecision(BaseModel):
     durationMs: int | None = None
 
 
+class PetUpdatePayload(BaseModel):
+    visible: bool = True
+    emotion: DecisionEmotion = "happy"
+    speak: str = ""
+    reason: str | None = None
+    durationMs: int | None = None
+
+
 class PetBehaviorRule(BaseModel):
     visible: bool = True
     emotion: PetEmotion

@@ -15,7 +15,7 @@ pip install -r requirements.txt
 Run:
 
 ```bash
-./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 ## Electron Bridge (Issue #5)

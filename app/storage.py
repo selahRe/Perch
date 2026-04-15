@@ -55,10 +55,22 @@ class MetricsRepository:
                     source TEXT NOT NULL,
                     token_usage_json TEXT,
                     latency_ms INTEGER NOT NULL,
-                    blocked_by TEXT
+                    blocked_by TEXT,
+                    llm_attempted INTEGER NOT NULL DEFAULT 0,
+                    llm_success INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            decision_columns = connection.execute("PRAGMA table_info(decision_history)").fetchall()
+            decision_column_names = {row[1] for row in decision_columns}
+            if "llm_attempted" not in decision_column_names:
+                connection.execute(
+                    "ALTER TABLE decision_history ADD COLUMN llm_attempted INTEGER NOT NULL DEFAULT 0"
+                )
+            if "llm_success" not in decision_column_names:
+                connection.execute(
+                    "ALTER TABLE decision_history ADD COLUMN llm_success INTEGER NOT NULL DEFAULT 0"
+                )
             connection.commit()
 
     def save_minute_record(
@@ -165,15 +177,17 @@ class MetricsRepository:
         token_usage: Mapping[str, int] | None,
         latency_ms: int,
         blocked_by: str | None,
+        llm_attempted: bool = False,
+        llm_success: bool = False,
     ) -> None:
         with self._lock:
             with self._connect() as connection:
                 connection.execute(
                     """
                     INSERT INTO decision_history (
-                        timestamp, context_hash, decision_json, source, token_usage_json, latency_ms, blocked_by
+                        timestamp, context_hash, decision_json, source, token_usage_json, latency_ms, blocked_by, llm_attempted, llm_success
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         timestamp.astimezone(timezone.utc).isoformat(),
@@ -183,6 +197,8 @@ class MetricsRepository:
                         json.dumps(token_usage, ensure_ascii=False) if token_usage else None,
                         latency_ms,
                         blocked_by,
+                        1 if llm_attempted else 0,
+                        1 if llm_success else 0,
                     ),
                 )
                 connection.commit()
@@ -193,7 +209,7 @@ class MetricsRepository:
             with self._connect() as connection:
                 rows = connection.execute(
                     """
-                    SELECT timestamp, context_hash, decision_json, source, token_usage_json, latency_ms, blocked_by
+                    SELECT timestamp, context_hash, decision_json, source, token_usage_json, latency_ms, blocked_by, llm_attempted, llm_success
                     FROM decision_history
                     ORDER BY id DESC
                     LIMIT ?
@@ -211,6 +227,8 @@ class MetricsRepository:
                     "token_usage": json.loads(str(row["token_usage_json"])) if row["token_usage_json"] else None,
                     "latency_ms": row["latency_ms"],
                     "blocked_by": row["blocked_by"],
+                    "llm_attempted": bool(row["llm_attempted"]),
+                    "llm_success": bool(row["llm_success"]),
                 }
             )
         return history
@@ -220,7 +238,7 @@ class MetricsRepository:
             with self._connect() as connection:
                 row = connection.execute(
                     """
-                    SELECT timestamp, context_hash, decision_json, source, token_usage_json, latency_ms, blocked_by
+                    SELECT timestamp, context_hash, decision_json, source, token_usage_json, latency_ms, blocked_by, llm_attempted, llm_success
                     FROM decision_history
                     ORDER BY id DESC
                     LIMIT 1
@@ -236,4 +254,6 @@ class MetricsRepository:
             "token_usage": json.loads(str(row["token_usage_json"])) if row["token_usage_json"] else None,
             "latency_ms": row["latency_ms"],
             "blocked_by": row["blocked_by"],
+            "llm_attempted": bool(row["llm_attempted"]),
+            "llm_success": bool(row["llm_success"]),
         }

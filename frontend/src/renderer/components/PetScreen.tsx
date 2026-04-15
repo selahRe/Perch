@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import ChatBubble from './ChatBubble';
 
@@ -9,6 +10,7 @@ export default function PetScreen() {
   const setPetEmotion = useAppStore((s) => s.setPetEmotion);
   const setPetVisible = useAppStore((s) => s.setPetVisible);
   const setMonitoringState = useAppStore((s) => s.setMonitoringState);
+  const [burstSpeedMs, setBurstSpeedMs] = useState(600);
 
   const handleStretch = () => {
     setPetEmotion('play');
@@ -29,30 +31,69 @@ export default function PetScreen() {
     );
   };
 
-  const mockFocused = () => {
+  const mockFocusDrop = () => {
     setMonitoringState({
       timestamp: new Date().toISOString(),
-      kpmValue: 112,
+      kpmValue: 10,
       label: 'Focused',
-      confidence: 0.96,
+      confidence: 0.72,
       appName: 'Code',
     });
     setPetVisible(true);
-    setPetEmotion('play');
-    setPetMessage('You have been focused for a long time! Great job!');
+    setPetEmotion('eat');
+    setPetMessage('You dropped from deep focus. Want a tiny reset before the next push?');
   };
 
-  const mockIdleReminder = () => {
+  const mockMeetingSoon = () => {
     setMonitoringState({
       timestamp: new Date().toISOString(),
-      kpmValue: 0,
-      label: 'Idle',
-      confidence: 1,
-      appName: 'Notes',
+      kpmValue: 18,
+      label: 'Relaxed',
+      confidence: 0.88,
+      appName: 'Zoom',
     });
     setPetVisible(true);
-    setPetEmotion('idle');
-    setPetMessage('Looks like you need a short break.');
+    setPetEmotion('happy');
+    setPetMessage('Meeting in 5 minutes. I will stay quiet and keep you on schedule.');
+  };
+
+  const mockPerformanceBurst = () => {
+    const frames = [
+      { kpmValue: 120, label: 'Focused' as const, emotion: 'play' as const, speak: 'Deep work mode. I am guarding your flow.' },
+      { kpmValue: 18, label: 'Relaxed' as const, emotion: 'eat' as const, speak: 'Context switch happened. Breathe once, then continue.' },
+      { kpmValue: 0, label: 'Idle' as const, emotion: 'happy' as const, speak: 'Tiny break detected. Shoulder roll and water?' },
+      { kpmValue: 70, label: 'Focused' as const, emotion: 'play' as const, speak: 'Nice recovery. You are back in rhythm.' },
+    ];
+    frames.forEach((frame, idx) => {
+      window.setTimeout(() => {
+        setMonitoringState({
+          timestamp: new Date().toISOString(),
+          kpmValue: frame.kpmValue,
+          label: frame.label,
+          confidence: 0.9,
+          appName: 'Cursor',
+        });
+        setPetVisible(true);
+        setPetEmotion(frame.emotion);
+        setPetMessage(frame.speak);
+      }, idx * burstSpeedMs);
+    });
+  };
+
+  const replayGreeting = async () => {
+    try {
+      await fetch('http://127.0.0.1:8000/ai/demo/reset-session', { method: 'POST' });
+      const response = await fetch('http://127.0.0.1:8000/pet/update');
+      if (!response.ok) {
+        throw new Error('failed to fetch pet update');
+      }
+      const payload = await response.json();
+      if (typeof payload.visible === 'boolean') setPetVisible(payload.visible);
+      if (typeof payload.emotion === 'string') setPetEmotion(payload.emotion);
+      if (typeof payload.speak === 'string') setPetMessage(payload.speak);
+    } catch (error) {
+      setPetMessage('Unable to replay greeting. Check backend connection.');
+    }
   };
 
   const mockHidden = () => {
@@ -94,11 +135,14 @@ export default function PetScreen() {
             <button className="primary-button hidden-reveal-button" onClick={showPet}>
               Show Pet Again
             </button>
-            <button className="secondary-button" onClick={mockFocused}>
-              Mock Focused
+            <button className="secondary-button" onClick={mockFocusDrop}>
+              Mock Focus Drop
             </button>
-            <button className="secondary-button" onClick={mockIdleReminder}>
-              Mock Idle
+            <button className="secondary-button" onClick={mockMeetingSoon}>
+              Mock Meeting +5m
+            </button>
+            <button className="secondary-button" onClick={mockPerformanceBurst}>
+              Demo Burst x4
             </button>
           </div>
         </div>
@@ -150,11 +194,38 @@ export default function PetScreen() {
         <button className="secondary-button" onClick={handleStretch}>
           Stretch Reminder
         </button>
-        <button className="secondary-button" onClick={mockFocused}>
-          Mock Focused
+        <button className="secondary-button" onClick={mockFocusDrop}>
+          Mock Focus Drop
         </button>
-        <button className="secondary-button" onClick={mockIdleReminder}>
-          Mock Idle
+        <button className="secondary-button" onClick={mockMeetingSoon}>
+          Mock Meeting +5m
+        </button>
+        <button
+          className="secondary-button"
+          onClick={() => setBurstSpeedMs(300)}
+          style={{ fontWeight: burstSpeedMs === 300 ? 700 : 400 }}
+        >
+          Burst Speed 0.3s
+        </button>
+        <button
+          className="secondary-button"
+          onClick={() => setBurstSpeedMs(600)}
+          style={{ fontWeight: burstSpeedMs === 600 ? 700 : 400 }}
+        >
+          Burst Speed 0.6s
+        </button>
+        <button
+          className="secondary-button"
+          onClick={() => setBurstSpeedMs(1000)}
+          style={{ fontWeight: burstSpeedMs === 1000 ? 700 : 400 }}
+        >
+          Burst Speed 1.0s
+        </button>
+        <button className="secondary-button" onClick={mockPerformanceBurst}>
+          Demo Burst x4 ({(burstSpeedMs / 1000).toFixed(1)}s)
+        </button>
+        <button className="secondary-button" onClick={replayGreeting}>
+          Replay First Greeting
         </button>
         <button className="secondary-button" onClick={mockHidden}>
           Hide Pet

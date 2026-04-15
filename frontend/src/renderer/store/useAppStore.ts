@@ -55,7 +55,7 @@ export const useAppStore = create<AppState>((set) => ({
   pet: {
     visible: true,
     emotion: 'happy',
-    message: 'Hi! I am Perch~',
+    message: '',
   },
 
   monitoring: {
@@ -124,11 +124,5 @@ export const useAppStore = create<AppState>((set) => ({
   finishOnboarding: () =>
     set((state) => ({
       currentScreen: 'petHome',
-      pet: {
-        ...state.pet,
-        message: state.profile.name
-          ? `Hi ${state.profile.name}! I'm ready to keep you company.`
-          : 'Hi! I am ready to keep you company.',
-      },
     })),
 }));

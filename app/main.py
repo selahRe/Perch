@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 import threading
 
 from fastapi import FastAPI, HTTPException, Query
@@ -7,6 +8,7 @@ from fastapi.responses import HTMLResponse
 
 from .agent_runtime import AgentRuntime
 from .config_store import ConfigStore
+from .env_loader import load_env_file
 from .models import (
     ConfigBundle,
     HistoryPoint,
@@ -14,6 +16,7 @@ from .models import (
     MonitoringState,
     PetDecision,
     PetState,
+    PetUpdatePayload,
     SaveResult,
     ThresholdsUpdateRequest,
     UserProfile,
@@ -21,6 +24,8 @@ from .models import (
 from .monitoring import KeyboardMonitor, RETENTION_HOURS
 from .protocol_adapter import PetUpdateAdapter
 from .reminder_manager import ReminderManager
+
+load_env_file(Path(__file__).resolve().parents[1] / ".env")
 
 
 keyboard_monitor: KeyboardMonitor | None = None
@@ -97,12 +102,18 @@ def get_monitoring_state() -> MonitoringState:
     return monitor.snapshot()
 
 
-@app.get("/pet/update", response_model=PetState)
-def get_pet_update_payload() -> PetState:
+@app.get("/pet/update", response_model=PetUpdatePayload)
+def get_pet_update_payload() -> PetUpdatePayload:
     monitor, _, store, reminders, runtime = _ensure_runtime()
     reminder_update = reminders.pop_pending_update()
     if reminder_update is not None:
-        return reminder_update
+        return PetUpdatePayload(
+            visible=reminder_update.visible,
+            emotion="happy" if reminder_update.emotion == "idle" else reminder_update.emotion,
+            speak=reminder_update.speak,
+            reason="reminder_pending",
+            durationMs=4000,
+        )
 
     state = monitor.snapshot()
     bundle = store.load_bundle()
@@ -111,7 +122,7 @@ def get_pet_update_payload() -> PetState:
         profile=bundle.profile,
         settings=bundle.settings,
     )
-    return runtime.as_pet_state(decision)
+    return runtime.as_pet_update_payload(decision)
 
 
 @app.get("/monitoring/history", response_model=list[HistoryPoint])
@@ -179,6 +190,13 @@ def get_latest_decision() -> PetDecision | None:
 def get_decision_history(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
     monitor, _, _, _, _ = _ensure_runtime()
     return monitor.repository.load_decision_history(limit=limit)
+
+
+@app.post("/ai/demo/reset-session", response_model=SaveResult)
+def reset_ai_demo_session() -> SaveResult:
+    _, _, _, _, runtime = _ensure_runtime()
+    runtime.reset_demo_session()
+    return SaveResult(success=True, message="ai demo session reset")
 
 
 @app.get("/debug/thresholds", response_class=HTMLResponse)
