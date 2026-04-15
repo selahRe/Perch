@@ -30,7 +30,13 @@ from .storage import MetricsRepository
 OBSERVATION_WINDOW_MINUTES = 30
 SESSION_DIGEST_INTERVAL_MINUTES = 30
 MAX_RECENT_DECISION_DIGESTS = 5
-MAX_RECENT_INTERACTIONS = 10
+
+# Chat memory: sliding window of user (semantic state) + assistant (pet lines) for LLM context.
+CHAT_WINDOW_MAX_MESSAGES = 20  # ~10 turns (user + assistant)
+CHAT_COMPACT_TRIGGER = 20  # compact while count is greater than this (e.g. >20 => 21+ messages)
+CHAT_COMPACT_REMOVE = 12
+CHAT_MAX_STORED_MESSAGES = 48
+MEMORY_MEMO_MAX_CHARS = 450
 
 INPUT_TOKEN_BUDGET = 800
 OUTPUT_TOKEN_BUDGET = 120
@@ -285,6 +291,116 @@ class HabitProfile:
         return self._profile
 
 
+class ConversationMemory:
+    """Sliding transcript for the LLM: user lines = semantic state, assistant = prior pet lines."""
+
+    __slots__ = ("_memo", "_messages")
+
+    def __init__(self) -> None:
+        self._memo = ""
+        self._messages: deque[dict[str, str]] = deque()
+
+    @property
+    def memo(self) -> str:
+        return self._memo
+
+    def window_for_api(self, *, max_messages: int = CHAT_WINDOW_MAX_MESSAGES) -> list[dict[str, str]]:
+        return [dict(item) for item in list(self._messages)[-max_messages:]]
+
+    def snapshot_lines(self, *, max_lines: int = 10) -> list[str]:
+        lines: list[str] = []
+        for item in list(self._messages)[-max_lines:]:
+            role = item.get("role", "")
+            content = (item.get("content") or "")[:200]
+            prefix = "User context" if role == "user" else "Perch"
+            lines.append(f"{prefix}: {content}")
+        return lines
+
+    def append_user(self, content: str) -> None:
+        text = " ".join(content.strip().split())
+        if not text:
+            return
+        self._messages.append({"role": "user", "content": text})
+
+    def append_assistant(self, content: str) -> None:
+        text = " ".join(content.strip().split())
+        if not text:
+            return
+        self._messages.append({"role": "assistant", "content": text})
+
+    def merge_memo(self, addition: str) -> None:
+        addition = " ".join(addition.strip().split())
+        if not addition:
+            return
+        merged = f"{self._memo} {addition}".strip() if self._memo else addition
+        if len(merged) > MEMORY_MEMO_MAX_CHARS:
+            merged = merged[-MEMORY_MEMO_MAX_CHARS:]
+        self._memo = merged
+
+    def pop_oldest(self, n: int) -> list[dict[str, str]]:
+        batch: list[dict[str, str]] = []
+        for _ in range(min(n, len(self._messages))):
+            batch.append(self._messages.popleft())
+        return batch
+
+    def __len__(self) -> int:
+        return len(self._messages)
+
+    def reset(self) -> None:
+        self._memo = ""
+        self._messages.clear()
+
+
+def _rule_based_chat_compact(batch: list[dict[str, str]]) -> str:
+    parts: list[str] = []
+    for item in batch:
+        role = item.get("role", "?")
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        short = content if len(content) <= 120 else f"{content[:117]}..."
+        parts.append(f"{role}: {short}")
+    merged = " | ".join(parts)
+    if len(merged) > 320:
+        merged = merged[:317] + "..."
+    return merged or "No memorable chat details."
+
+
+def _semantic_behavior_narrative(
+    *,
+    context: DecisionContext,
+    reason: str,
+    scenario_tag: str,
+) -> str:
+    """Turn raw metrics into a short English line for the user-role message buffer."""
+    name = context.profile.username.strip() or "The user"
+    app = (context.app.active_app or "an unknown app").strip()
+    status = context.app.status_label
+    k1 = int(context.kpm.kpm_1m)
+    k5 = int(context.kpm.kpm_5m)
+    k30 = int(context.kpm.kpm_30m_avg)
+    digest = (context.session_digest or "").strip() or "No 30m digest yet."
+
+    if k1 >= 95 and k5 >= 85:
+        pace = "in a deep-work sprint with very high typing pace"
+    elif k1 >= 60:
+        pace = "typing steadily at a strong focus pace"
+    elif k1 <= 2 and k5 <= 5:
+        pace = "mostly still, likely away from the keyboard or resting"
+    elif k1 <= 15 and k5 >= 50:
+        pace = "just slowed sharply after a stretch of intense typing"
+    elif k1 <= 15:
+        pace = "quiet at the keys, maybe thinking or stuck"
+    else:
+        pace = "at a moderate rhythm at the desk"
+
+    return (
+        f"[{scenario_tag}] {name} is in {app} ({status} status). "
+        f"Typing story: {pace} (1m/5m/30m avg KPM: {k1}/{k5}/{k30}). "
+        f"Digest: {digest} Decision hook: {reason}."
+    )
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -300,7 +416,7 @@ class AgentRuntime:
         self._animation_hook = animation_hook or AnimationHook()
         self._interruption_logic = InterruptionLogic()
         self._recent_decisions: deque[PetDecision] = deque(maxlen=MAX_RECENT_DECISION_DIGESTS)
-        self._recent_interactions: deque[str] = deque(maxlen=MAX_RECENT_INTERACTIONS)
+        self._conversation = ConversationMemory()
         self._decision_timestamps: deque[datetime] = deque()
         self._ai_call_timestamps: deque[datetime] = deque()
         self._ai_token_usage: deque[tuple[datetime, int]] = deque()
@@ -386,6 +502,14 @@ class AgentRuntime:
             llm_success=llm_success,
         )
         self._recent_decisions.append(decision)
+        speak_for_memory = (decision.speak or "").strip()
+        if speak_for_memory and speak_for_memory != "...":
+            tag = scenario.tag if scenario else "general"
+            self._conversation.append_user(
+                _semantic_behavior_narrative(context=context, reason=reason, scenario_tag=tag)
+            )
+            self._conversation.append_assistant(speak_for_memory)
+            self._prune_and_compact_conversation()
         self._previous_kpm = state.kpm_value
         return decision
 
@@ -412,7 +536,7 @@ class AgentRuntime:
             profile=profile,
             settings=settings,
             session_digest=digest,
-            recent_interactions=list(self._recent_interactions),
+            recent_interactions=self._conversation.snapshot_lines(),
             recent_decisions_digest=[
                 f"{item.reason}:{item.speak[:30]}"
                 for item in list(self._recent_decisions)[-MAX_RECENT_DECISION_DIGESTS:]
@@ -575,64 +699,129 @@ class AgentRuntime:
                         "messages": payload,
                     },
                 )
-            response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
-            speak = str(parsed.get("speak", "")).strip() or base_decision.speak
-            speak = _normalize_cat_tone(speak)
-            if speak in recent_speaks:
-                retry_response = await client.post(
+                response.raise_for_status()
+                body = response.json()
+                content = body["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                speak = str(parsed.get("speak", "")).strip() or base_decision.speak
+                speak = _normalize_cat_tone(speak)
+                emotion = parsed.get("emotion", base_decision.emotion)
+                final_messages: list[dict] = payload
+
+                if speak in recent_speaks:
+                    retry_messages = payload + [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous line was too similar to recent lines. "
+                                "Try different wording while keeping intent."
+                            ),
+                        }
+                    ]
+                    retry_response = await client.post(
+                        url,
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                        json={
+                            "model": model,
+                            "temperature": 0.95,
+                            "top_p": 0.9,
+                            "max_tokens": OUTPUT_TOKEN_BUDGET,
+                            "response_format": {"type": "json_object"},
+                            "messages": retry_messages,
+                        },
+                    )
+                    retry_response.raise_for_status()
+                    retry_body = retry_response.json()
+                    retry_content = retry_body["choices"][0]["message"]["content"]
+                    retry_parsed = json.loads(retry_content)
+                    retry_speak = _normalize_cat_tone(str(retry_parsed.get("speak", "")).strip() or speak)
+                    if retry_speak not in recent_speaks:
+                        speak = retry_speak
+                    emotion = retry_parsed.get("emotion", emotion)
+                    final_messages = retry_messages
+                    if emotion not in {"happy", "eat", "play"}:
+                        emotion = base_decision.emotion
+
+                if emotion not in {"happy", "eat", "play"}:
+                    emotion = base_decision.emotion
+                output_tokens = _estimate_tokens(speak)
+                if output_tokens > OUTPUT_TOKEN_BUDGET:
+                    speak = speak[: OUTPUT_TOKEN_BUDGET * 3]
+                    output_tokens = _estimate_tokens(speak)
+                usage = {
+                    "input_tokens": _estimate_tokens(json.dumps(final_messages, ensure_ascii=False)),
+                    "output_tokens": output_tokens,
+                }
+                now = datetime.now(timezone.utc)
+                self._ai_call_timestamps.append(now)
+                self._ai_token_usage.append((now, usage["input_tokens"] + usage["output_tokens"]))
+                return (
+                    PetDecision(
+                        visible=True,
+                        emotion=emotion,
+                        speak=speak,
+                        reason=reason,
+                        source="ai",
+                        durationMs=4000,
+                    ),
+                    usage,
+                )
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
+            return None
+
+    async def _compact_batch_to_memo(self, batch: list[dict[str, str]]) -> str:
+        """Fold older chat lines into a short English memo (LLM with deterministic rule fallback)."""
+        disable = (os.getenv("PERCH_CHAT_COMPACT_DISABLE_LLM") or "").strip().lower() in {"1", "true", "yes", "on"}
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+        if disable or not api_key or not batch:
+            return _rule_based_chat_compact(batch)
+        url = _resolve_llm_chat_completions_url()
+        model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        compact_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You compress old lines of a desktop pet chat into one English memory note for future prompts. "
+                    "Focus on stable habits, tone, and anything Perch should remember. "
+                    "Max 80 words. Output JSON only: {\"memo\":\"...\"}."
+                ),
+            },
+            {"role": "user", "content": json.dumps({"chat_batch": batch}, ensure_ascii=False)},
+        ]
+        try:
+            async with httpx.AsyncClient(timeout=AI_TIMEOUT_SECONDS) as client:
+                r = await client.post(
                     url,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                     json={
                         "model": model,
-                        "temperature": 0.95,
+                        "temperature": 0.25,
                         "top_p": 0.9,
-                        "max_tokens": OUTPUT_TOKEN_BUDGET,
+                        "max_tokens": 220,
                         "response_format": {"type": "json_object"},
-                        "messages": payload + [
-                            {
-                                "role": "user",
-                                "content": "Your previous line was too similar to recent lines. Try different wording while keeping intent.",
-                            }
-                        ],
+                        "messages": compact_messages,
                     },
                 )
-                retry_response.raise_for_status()
-                retry_body = retry_response.json()
-                retry_content = retry_body["choices"][0]["message"]["content"]
-                retry_parsed = json.loads(retry_content)
-                retry_speak = _normalize_cat_tone(str(retry_parsed.get("speak", "")).strip() or speak)
-                if retry_speak not in recent_speaks:
-                    speak = retry_speak
-            emotion = parsed.get("emotion", base_decision.emotion)
-            if emotion not in {"happy", "eat", "play"}:
-                emotion = base_decision.emotion
-            output_tokens = _estimate_tokens(speak)
-            if output_tokens > OUTPUT_TOKEN_BUDGET:
-                speak = speak[: OUTPUT_TOKEN_BUDGET * 3]
-                output_tokens = _estimate_tokens(speak)
-            usage = {
-                "input_tokens": _estimate_tokens(json.dumps(payload, ensure_ascii=False)),
-                "output_tokens": output_tokens,
-            }
-            now = datetime.now(timezone.utc)
-            self._ai_call_timestamps.append(now)
-            self._ai_token_usage.append((now, usage["input_tokens"] + usage["output_tokens"]))
-            return (
-                PetDecision(
-                    visible=True,
-                    emotion=emotion,
-                    speak=speak,
-                    reason=reason,
-                    source="ai",
-                    durationMs=4000,
-                ),
-                usage,
-            )
+                r.raise_for_status()
+                memo_raw = r.json()["choices"][0]["message"]["content"]
+                memo_obj = json.loads(memo_raw)
+                memo = str(memo_obj.get("memo", "")).strip()
+                if not memo:
+                    return _rule_based_chat_compact(batch)
+                words = memo.split()
+                if len(words) > 80:
+                    memo = " ".join(words[:80])
+                return memo
         except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
-            return None
+            return _rule_based_chat_compact(batch)
+
+    def _prune_and_compact_conversation(self) -> None:
+        while len(self._conversation) > CHAT_MAX_STORED_MESSAGES:
+            self._conversation.pop_oldest(2)
+        while len(self._conversation) > CHAT_COMPACT_TRIGGER:
+            batch = self._conversation.pop_oldest(CHAT_COMPACT_REMOVE)
+            summary = asyncio.run(self._compact_batch_to_memo(batch))
+            self._conversation.merge_memo(summary)
 
     def _fallback_decision(self, *, reason: str, emotion: str) -> PetDecision:
         return PetDecision(
@@ -682,6 +871,8 @@ class AgentRuntime:
             "Do not reuse exact wording from recent_decisions. "
             "Output JSON only."
         )
+        if self._conversation.memo:
+            system_personality += f" Rolled-up memory: {self._conversation.memo}"
         user_profile = {
             "username": context.profile.username,
             "free_time": context.profile.free_time,
@@ -697,9 +888,15 @@ class AgentRuntime:
             "scenario_tag": scenario_tag,
             "tone_variant": tone_variant,
         }
-        return [
-            {"role": "system", "content": system_personality},
-            {"role": "user", "content": json.dumps({"profile": user_profile, "context": context_summary}, ensure_ascii=False)},
+        messages: list[dict] = [{"role": "system", "content": system_personality}]
+        messages.extend(self._conversation.window_for_api())
+        messages.append(
+            {
+                "role": "user",
+                "content": json.dumps({"profile": user_profile, "context": context_summary}, ensure_ascii=False),
+            }
+        )
+        messages.append(
             {
                 "role": "user",
                 "content": (
@@ -708,8 +905,9 @@ class AgentRuntime:
                     "Constraints: English only, at most 20 words in speak, no markdown, no extra keys. "
                     "Address user by name when available."
                 ),
-            },
-        ]
+            }
+        )
+        return messages
 
     def _prune_window_queues(self, now: datetime) -> None:
         one_hour_ago = now - timedelta(hours=1)
@@ -750,6 +948,7 @@ class AgentRuntime:
         self._last_emit_at = None
         self._last_reason_at.clear()
         self._decision_timestamps.clear()
+        self._conversation.reset()
 
     def next_calendar_meeting(self) -> dict | None:
         return self._calendar_provider.next_meeting()
