@@ -25,6 +25,7 @@ from .models import (
 from .monitoring import KeyboardMonitor, RETENTION_HOURS
 from .protocol_adapter import PetUpdateAdapter
 from .reminder_manager import ReminderManager
+from .work_hours import infer_is_work_hour
 
 load_env_file(Path(__file__).resolve().parents[1] / ".env")
 
@@ -50,11 +51,20 @@ def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, R
             monitor = keyboard_monitor
 
             def on_minute_complete(state: MonitoringState) -> None:
+                settings = monitor.settings_store.load()
                 monitor.repository.save_minute_record(
                     timestamp=state.timestamp,
                     kpm_value=state.kpm_value,
                     status_label=state.status.label,
                     app_name=state.app_name,
+                    is_work_hour=infer_is_work_hour(
+                        timestamp=state.timestamp,
+                        app_name=state.app_name,
+                        kpm_value=state.kpm_value,
+                        work_time_start=settings.work_time_start,
+                        work_time_end=settings.work_time_end,
+                    ),
+                    status_code=state.status_code,
                 )
                 monitor.repository.cleanup_older_than(hours=RETENTION_HOURS)
                 active_reminder_manager.process_minute(state)

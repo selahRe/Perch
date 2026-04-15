@@ -16,13 +16,14 @@ from .classifier import StatusClassifier
 from .models import HistoryPoint, MonitoringSettings, MonitoringState, StatusClassification
 from .settings_store import SettingsStore
 from .storage import MetricsRepository
+from .work_hours import infer_is_work_hour
 
 
 LOGGER = logging.getLogger(__name__)
 
 MINUTE_SECONDS = 60
 APP_SAMPLING_SECONDS = 1.0
-RETENTION_HOURS = 24
+RETENTION_HOURS = 14 * 24
 
 MinuteCallback = Callable[[MonitoringState], None]
 
@@ -39,9 +40,9 @@ class KeyboardMonitor:
         default_storage_root = get_default_perch_storage_root()
         self.db_path = db_path or (project_root / "perch_metrics.sqlite3")
         self.settings_store = SettingsStore(settings_path or (default_storage_root / "settings.json"))
-        self.classifier = StatusClassifier(self.settings_store)
         self.minute_seconds = minute_seconds
         self.repository = MetricsRepository(self.db_path)
+        self.classifier = StatusClassifier(self.settings_store, repository=self.repository)
         self.on_minute_complete = on_minute_complete or self._default_minute_callback
 
         self._lock = threading.Lock()
@@ -58,7 +59,9 @@ class KeyboardMonitor:
         self._latest_state = MonitoringState(
             timestamp=datetime.now(timezone.utc),
             kpm_value=0,
+            status_code=0,
             status=StatusClassification(label="Idle", confidence=1.0),
+            user_cluster="offline_rest",
             app_name=None,
         )
         self._status_started_at = self._latest_state.timestamp
@@ -197,12 +200,22 @@ class KeyboardMonitor:
 
         app_name = self._pick_dominant_app(app_durations_seconds)
 
-        classification = self.classifier.classify(kpm_value=kpm_value, app_name=app_name)
+        classification = self.classifier.classify_with_cluster(kpm_value=kpm_value, app_name=app_name)
         timestamp = datetime.now(timezone.utc)
+        settings = self.settings_store.load()
+        is_work_hour = infer_is_work_hour(
+            timestamp=timestamp,
+            app_name=app_name,
+            kpm_value=kpm_value,
+            work_time_start=settings.work_time_start,
+            work_time_end=settings.work_time_end,
+        )
         state = MonitoringState(
             timestamp=timestamp,
             kpm_value=kpm_value,
-            status=classification,
+            status_code=self._status_code_from_label(classification.status.label),
+            status=classification.status,
+            user_cluster=classification.user_cluster,
             app_name=app_name,
             current_minute_count=0,
             listener_running=bool(self._listener and self._listener.is_alive()),
@@ -213,7 +226,7 @@ class KeyboardMonitor:
         )
 
         with self._lock:
-            if classification.label != previous_label:
+            if classification.status.label != previous_label:
                 self._status_started_at = timestamp
             self._latest_state = state
             self._last_minute_completed_at = timestamp
@@ -221,7 +234,7 @@ class KeyboardMonitor:
         LOGGER.info(
             "Minute sample completed: kpm=%s status=%s app=%s listener_running=%s listener_error=%s app_seconds=%s",
             kpm_value,
-            classification.label,
+            classification.status.label,
             app_name or "unknown",
             bool(self._listener and self._listener.is_alive()),
             self._listener_error or "none",
@@ -239,6 +252,14 @@ class KeyboardMonitor:
             kpm_value=state.kpm_value,
             status_label=state.status.label,
             app_name=state.app_name,
+            is_work_hour=infer_is_work_hour(
+                timestamp=state.timestamp,
+                app_name=state.app_name,
+                kpm_value=state.kpm_value,
+                work_time_start=self.settings_store.load().work_time_start,
+                work_time_end=self.settings_store.load().work_time_end,
+            ),
+            status_code=state.status_code,
         )
         self.repository.cleanup_older_than(hours=RETENTION_HOURS)
 
@@ -284,3 +305,10 @@ class KeyboardMonitor:
         except Exception:
             LOGGER.exception("Unexpected error while reading active app name")
             return None
+
+    def _status_code_from_label(self, label: str) -> int:
+        if label == "Focused":
+            return 2
+        if label == "Relaxed":
+            return 1
+        return 0
