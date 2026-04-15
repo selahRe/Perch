@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
-import random
-from .models import StatusLabel, UserClusterLabel
+
+from .models import UserClusterLabel
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,6 @@ class UserClusterEngine:
         self.last_trained_at: datetime | None = None
         self.centers: list[tuple[float, float]] = []
         self.cluster_labels: dict[int, UserClusterLabel] = {}
-        self._rand = random.Random()
 
     def ensure_model(self, history_rows: list[dict], now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)
@@ -73,73 +72,6 @@ class UserClusterEngine:
             app_name = row.get("app_name")
             samples.append(ClusterSample(kpm=kpm_value, app_score=_app_score(app_name)))
         return samples
-
-    def generate_weekly_seed_rows(self, now: datetime) -> list[dict]:
-        # Build one-week minute-level records for sparse-data cold start.
-        monday_start = (now - timedelta(days=now.weekday())).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        rows: list[dict] = []
-
-        for day_offset in range(7):
-            day_base = monday_start + timedelta(days=day_offset)
-            weekday = day_base.weekday()
-            for minute_of_day in range(24 * 60):
-                current = day_base + timedelta(minutes=minute_of_day)
-                app_name, kpm = self._simulate_minute(weekday=weekday, current=current)
-                rows.append(
-                    {
-                        "timestamp": current.astimezone(timezone.utc),
-                        "kpm_value": int(kpm),
-                        "app_name": app_name,
-                        "status_label": self._status_label_from_kpm(kpm),
-                    }
-                )
-        return rows
-
-    def _simulate_minute(self, weekday: int, current: datetime) -> tuple[str, int]:
-        minute_of_day = current.hour * 60 + current.minute
-        in_morning_research = 11 * 60 <= minute_of_day < 12 * 60
-        in_lunch_video = 12 * 60 <= minute_of_day < 13 * 60
-        in_work_window = 13 * 60 + 30 <= minute_of_day <= 18 * 60
-
-        monday_class = weekday == 0 and (16 * 60 + 30) <= minute_of_day <= (17 * 60 + 55)
-        wednesday_class = weekday == 2 and (13 * 60 + 40) <= minute_of_day <= (17 * 60 + 55)
-        in_class = monday_class or wednesday_class
-
-        if in_work_window and not in_class:
-            return self._simulate_work_minute()
-        if in_class:
-            return self._simulate_class_minute()
-        if in_morning_research:
-            return ("Safari", self._clamped_gauss(mean=16, std=6))
-        if in_lunch_video:
-            return ("Safari", self._clamped_gauss(mean=4, std=3))
-
-        return ("Offline", self._clamped_gauss(mean=1, std=1))
-
-    def _simulate_work_minute(self) -> tuple[str, int]:
-        roll = self._rand.random()
-        if roll < 0.45:
-            return ("Code", self._clamped_gauss(mean=118, std=18))
-        if roll < 0.75:
-            return ("Safari", self._clamped_gauss(mean=95, std=20))  # LeetCode in browser
-        if roll < 0.88:
-            return ("Word", self._clamped_gauss(mean=55, std=14))
-        if roll < 0.94:
-            return ("Zoom", self._clamped_gauss(mean=22, std=9))
-        return ("WeChat", self._clamped_gauss(mean=28, std=12))
-
-    def _simulate_class_minute(self) -> tuple[str, int]:
-        roll = self._rand.random()
-        if roll < 0.72:
-            return ("Zoom", self._clamped_gauss(mean=18, std=7))
-        if roll < 0.90:
-            return ("WeChat", self._clamped_gauss(mean=20, std=8))
-        return ("Safari", self._clamped_gauss(mean=14, std=6))
 
     def _fit(self, samples: list[ClusterSample]) -> None:
         points = [(sample.kpm, sample.app_score) for sample in samples]
@@ -193,13 +125,3 @@ class UserClusterEngine:
     def _distance(self, lhs: tuple[float, float], rhs: tuple[float, float]) -> float:
         # Weighted distance: typing cadence is stronger than app category.
         return math.sqrt(((lhs[0] - rhs[0]) ** 2) + ((lhs[1] - rhs[1]) ** 2) * 36.0)
-
-    def _clamped_gauss(self, mean: float, std: float) -> int:
-        return max(0, int(round(self._rand.gauss(mean, std))))
-
-    def _status_label_from_kpm(self, kpm: int) -> StatusLabel:
-        if kpm < 8:
-            return "Idle"
-        if kpm >= 70:
-            return "Focused"
-        return "Relaxed"

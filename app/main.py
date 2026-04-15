@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
+from .bootstrap_history import WeeklyHistoryBootstrapper
 from .config_store import ConfigStore
 from .models import (
     ConfigBundle,
@@ -25,14 +26,18 @@ keyboard_monitor: KeyboardMonitor | None = None
 pet_update_adapter: PetUpdateAdapter | None = None
 config_store: ConfigStore | None = None
 reminder_manager: ReminderManager | None = None
+history_bootstrapper: WeeklyHistoryBootstrapper | None = None
 _runtime_lock = threading.Lock()
 
 
 def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, ReminderManager]:
-    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager
+    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager, history_bootstrapper
     with _runtime_lock:
         if keyboard_monitor is None:
             keyboard_monitor = KeyboardMonitor()
+        if history_bootstrapper is None:
+            history_bootstrapper = WeeklyHistoryBootstrapper()
+            history_bootstrapper.ensure_seeded(keyboard_monitor.repository)
         if reminder_manager is None:
             reminder_manager = ReminderManager(keyboard_monitor.settings_store)
             active_reminder_manager = reminder_manager

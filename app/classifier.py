@@ -18,7 +18,6 @@ class StatusClassifier:
         self.settings_store = settings_store
         self.repository = repository
         self.cluster_engine = cluster_engine or UserClusterEngine()
-        self._minimum_history_samples = 240
 
     def classify(self, kpm_value: int, app_name: str | None = None) -> StatusClassification:
         settings = self.settings_store.load()
@@ -76,22 +75,8 @@ class StatusClassifier:
     def _load_recent_history(self, now: datetime) -> list[dict]:
         if self.repository is None:
             return []
-        since = now - timedelta(days=7)
-        rows = self.repository.load_history(since_timestamp=since)
-        records = [dict(row) for row in rows]
-        if len(records) >= self._minimum_history_samples:
-            return records
-
-        seed_rows = self.cluster_engine.generate_weekly_seed_rows(now=now)
-        for row in seed_rows:
-            self.repository.save_minute_record(
-                timestamp=row["timestamp"],
-                kpm_value=int(row["kpm_value"]),
-                status_label=row["status_label"],
-                app_name=row["app_name"],
-            )
-        reloaded_rows = self.repository.load_history(since_timestamp=since)
-        return [dict(row) for row in reloaded_rows]
+        rows = self.repository.load_history(since_timestamp=now - timedelta(days=7))
+        return [dict(row) for row in rows]
 
     def _cluster_to_status(
         self,

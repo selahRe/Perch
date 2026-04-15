@@ -90,3 +90,16 @@ class MetricsRepository:
                     (since_timestamp.astimezone(timezone.utc).isoformat(),),
                 ).fetchall()
         return list(rows)
+
+    def count_history(self, since_timestamp: datetime) -> int:
+        with self._lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM monitoring_history
+                    WHERE timestamp >= ?
+                    """,
+                    (since_timestamp.astimezone(timezone.utc).isoformat(),),
+                ).fetchone()
+        return int(row["total"]) if row is not None else 0

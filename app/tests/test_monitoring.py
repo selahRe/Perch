@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 
 import app.main as main_module
+from app.bootstrap_history import WeeklyHistoryBootstrapper
 from app.config_store import ConfigStore
 from app.classifier import StatusClassifier
 from app.models import MonitoringSettings, MonitoringState, PetState, StatusClassification, ThresholdsUpdateRequest, UserProfile
@@ -110,6 +111,21 @@ def test_user_cluster_engine_retrains_every_24_hours():
     assert trained_at_after_third == third_train
 
 
+def test_weekly_bootstrapper_seeds_history_into_database(tmp_path):
+    repository = MetricsRepository(tmp_path / "metrics.sqlite3")
+    bootstrapper = WeeklyHistoryBootstrapper(seed=2026)
+
+    bootstrapper.ensure_seeded(
+        repository=repository,
+        now=datetime(2026, 4, 15, 18, 0, tzinfo=timezone.utc),
+    )
+
+    rows = repository.load_history(
+        since_timestamp=datetime(2026, 4, 8, 18, 0, tzinfo=timezone.utc),
+    )
+    assert len(rows) >= 7 * 24 * 60
+
+
 def test_protocol_adapter_maps_kpm_and_duration_to_pet_payload():
     focused_long = get_pet_update(
         status_duration_seconds=31 * 60,
@@ -185,6 +201,7 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     monkeypatch.setattr(main_module, "keyboard_monitor", monitor)
     monkeypatch.setattr(main_module, "pet_update_adapter", adapter)
     monkeypatch.setattr(main_module, "config_store", store)
+    monkeypatch.setattr(main_module, "history_bootstrapper", WeeklyHistoryBootstrapper())
     monkeypatch.setattr(
         main_module,
         "current_state",
