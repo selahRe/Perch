@@ -259,6 +259,15 @@ def get_next_calendar_meeting() -> dict:
     return {"meeting": meeting}
 
 
+@app.get("/ai/memory/recent")
+def get_recent_long_term_memory(
+    days: int = Query(default=7, ge=1, le=30),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> list[dict]:
+    _, _, _, _, runtime = _ensure_runtime()
+    return runtime.recent_long_term_memory(days=days, limit=limit)
+
+
 @app.get("/debug/thresholds", response_class=HTMLResponse)
 def debug_thresholds_page() -> HTMLResponse:
         html = """

@@ -37,6 +37,10 @@ CHAT_COMPACT_TRIGGER = 20  # compact while count is greater than this (e.g. >20 
 CHAT_COMPACT_REMOVE = 12
 CHAT_MAX_STORED_MESSAGES = 48
 MEMORY_MEMO_MAX_CHARS = 450
+LONG_MEMORY_LOOKBACK_DAYS = 7
+LONG_MEMORY_PROMPT_LIMIT = 3
+LONG_MEMORY_REFRESH_MINUTES = 60 * 4
+LONG_MEMORY_MIN_SAMPLES = 30
 
 INPUT_TOKEN_BUDGET = 800
 OUTPUT_TOKEN_BUDGET = 120
@@ -401,6 +405,24 @@ def _semantic_behavior_narrative(
     )
 
 
+def _memory_keywords(text: str) -> set[str]:
+    lowered = text.lower()
+    keywords = {
+        "late",
+        "night",
+        "sleep",
+        "rest",
+        "tired",
+        "focus",
+        "idle",
+        "offline",
+        "break",
+        "fatigue",
+        "work",
+    }
+    return {word for word in keywords if word in lowered}
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -427,6 +449,8 @@ class AgentRuntime:
         self._last_daily_greeting: date | None = None
         self._meeting_announced_days: set[date] = set()
         self._tone_variants = ("playful", "cozy", "witty", "gentle")
+        self._last_long_memory_refresh_at: datetime | None = None
+        self._cached_long_memory_notes: list[str] = []
 
     def run_cycle(self, state: MonitoringState, profile: UserProfile, settings) -> PetDecision:
         started = time.perf_counter()
@@ -437,6 +461,7 @@ class AgentRuntime:
         llm_success = False
 
         context = self._collect(state=state, profile=profile, settings=settings)
+        self._maybe_refresh_long_term_memory(context=context)
         scenario = self._match_scenario(context)
         reason = scenario.reason if scenario else self._classify(context)
         decision = self._decide_from_rules(context, reason, scenario=scenario)
@@ -744,6 +769,7 @@ class AgentRuntime:
 
                 if emotion not in {"happy", "eat", "play"}:
                     emotion = base_decision.emotion
+                speak = self._enforce_memory_reference_for_greeting(reason=reason, speak=speak)
                 output_tokens = _estimate_tokens(speak)
                 if output_tokens > OUTPUT_TOKEN_BUDGET:
                     speak = speak[: OUTPUT_TOKEN_BUDGET * 3]
@@ -823,6 +849,168 @@ class AgentRuntime:
             summary = asyncio.run(self._compact_batch_to_memo(batch))
             self._conversation.merge_memo(summary)
 
+    def _maybe_refresh_long_term_memory(self, *, context: DecisionContext) -> None:
+        now = datetime.now(timezone.utc)
+        latest_note = self._repository.load_latest_memory_note()
+        if latest_note is not None and latest_note.get("timestamp"):
+            try:
+                latest_ts = datetime.fromisoformat(str(latest_note["timestamp"]))
+                if latest_ts.tzinfo is None:
+                    latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+                if (now - latest_ts.astimezone(timezone.utc)) < timedelta(minutes=LONG_MEMORY_REFRESH_MINUTES):
+                    self._refresh_cached_long_memory_notes()
+                    return
+            except ValueError:
+                pass
+        if self._last_long_memory_refresh_at and (now - self._last_long_memory_refresh_at) < timedelta(
+            minutes=LONG_MEMORY_REFRESH_MINUTES
+        ):
+            self._refresh_cached_long_memory_notes()
+            return
+
+        since = now - timedelta(days=1)
+        rows = self._repository.load_history(since)
+        if len(rows) < LONG_MEMORY_MIN_SAMPLES:
+            self._refresh_cached_long_memory_notes()
+            self._last_long_memory_refresh_at = now
+            return
+
+        note = asyncio.run(self._build_long_term_memory_note(context=context, rows=rows))
+        self._last_long_memory_refresh_at = now
+        if not note:
+            self._refresh_cached_long_memory_notes()
+            return
+
+        self._repository.save_memory_note(
+            timestamp=now,
+            source="ai_long_memory",
+            note=note,
+            window_start=since,
+            window_end=now,
+            tags=self._infer_memory_tags(context=context, rows=rows),
+            score=0.85,
+        )
+        self._refresh_cached_long_memory_notes()
+
+    async def _build_long_term_memory_note(
+        self,
+        *,
+        context: DecisionContext,
+        rows: list,
+    ) -> str | None:
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            return None
+        url = _resolve_llm_chat_completions_url()
+        model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+
+        focused = sum(1 for row in rows if row["status_label"] == "Focused")
+        idle = sum(1 for row in rows if row["status_label"] == "Idle")
+        avg_kpm = int(sum(int(row["kpm_value"]) for row in rows) / max(1, len(rows)))
+        app_counts: dict[str, int] = {}
+        for row in rows:
+            app = str(row["app_name"] or "unknown").strip() or "unknown"
+            app_counts[app] = app_counts.get(app, 0) + 1
+        top_apps = sorted(app_counts.items(), key=lambda item: item[1], reverse=True)[:4]
+        recent_decisions = [f"{item.reason}:{item.speak[:40]}" for item in list(self._recent_decisions)[-5:]]
+
+        compact_context = {
+            "user": context.profile.username or "friend",
+            "window": "last_24h",
+            "samples": len(rows),
+            "avg_kpm": avg_kpm,
+            "focused_samples": focused,
+            "idle_samples": idle,
+            "top_apps": top_apps,
+            "session_digest": context.session_digest,
+            "habit_profile": context.habit_profile,
+            "recent_decisions": recent_decisions,
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You summarize long-term behavior memory for a desktop companion cat. "
+                    "Write one concise English memory note that can be reused in future prompts. "
+                    "Keep it under 40 words. Mention trends (work rhythm, fatigue, timing) not raw numbers. "
+                    "Output JSON only: {\"note\":\"...\"}."
+                ),
+            },
+            {"role": "user", "content": json.dumps(compact_context, ensure_ascii=False)},
+        ]
+        try:
+            async with httpx.AsyncClient(timeout=AI_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": model,
+                        "temperature": 0.35,
+                        "top_p": 0.9,
+                        "max_tokens": 120,
+                        "response_format": {"type": "json_object"},
+                        "messages": messages,
+                    },
+                )
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+                parsed = json.loads(content)
+                note = " ".join(str(parsed.get("note", "")).strip().split())
+                if not note:
+                    return None
+                words = note.split(" ")
+                if len(words) > 40:
+                    note = " ".join(words[:40])
+                return note
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
+            return None
+
+    def _infer_memory_tags(self, *, context: DecisionContext, rows: list) -> list[str]:
+        tags: set[str] = set()
+        if context.kpm.kpm_30m_avg >= 70:
+            tags.add("high_focus")
+        if context.kpm.kpm_30m_avg <= 10:
+            tags.add("low_activity")
+        late = False
+        for row in rows:
+            try:
+                ts = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+                if ts.astimezone().hour >= 23:
+                    late = True
+                    break
+            except ValueError:
+                continue
+        if late:
+            tags.add("late_work")
+        return sorted(tags)
+
+    def _refresh_cached_long_memory_notes(self) -> None:
+        notes = self._repository.load_recent_memory_notes(days=LONG_MEMORY_LOOKBACK_DAYS, limit=LONG_MEMORY_PROMPT_LIMIT)
+        self._cached_long_memory_notes = [str(item.get("note", "")).strip() for item in notes if item.get("note")]
+
+    def _enforce_memory_reference_for_greeting(self, *, reason: str, speak: str) -> str:
+        if reason not in {"morning_greeting", "daytime_greeting"}:
+            return speak
+        if not self._cached_long_memory_notes:
+            return speak
+        joined_notes = " ".join(self._cached_long_memory_notes)
+        note_keywords = _memory_keywords(joined_notes)
+        if not note_keywords:
+            return speak
+        speak_keywords = _memory_keywords(speak)
+        if speak_keywords.intersection(note_keywords):
+            return speak
+        # Force one concise memory trend mention when greeting but memory exists.
+        user_line = "friend"
+        memory_hint = self._cached_long_memory_notes[0]
+        patched = f"{speak.rstrip('. ')} Also, {user_line}, {memory_hint}"
+        patched = _normalize_cat_tone(patched)
+        words = patched.split(" ")
+        if len(words) > MAX_SPEAK_WORDS:
+            patched = " ".join(words[:MAX_SPEAK_WORDS])
+            patched = _normalize_cat_tone(patched)
+        return patched
+
     def _fallback_decision(self, *, reason: str, emotion: str) -> PetDecision:
         return PetDecision(
             visible=True,
@@ -871,8 +1059,12 @@ class AgentRuntime:
             "Do not reuse exact wording from recent_decisions. "
             "Output JSON only."
         )
+        if not self._cached_long_memory_notes:
+            self._refresh_cached_long_memory_notes()
         if self._conversation.memo:
             system_personality += f" Rolled-up memory: {self._conversation.memo}"
+        if self._cached_long_memory_notes:
+            system_personality += " Long-term memory hints: " + " | ".join(self._cached_long_memory_notes)
         user_profile = {
             "username": context.profile.username,
             "free_time": context.profile.free_time,
@@ -885,6 +1077,7 @@ class AgentRuntime:
             "session_digest": context.session_digest,
             "habit_profile": context.habit_profile,
             "recent_decisions": context.recent_decisions_digest,
+            "long_term_notes": self._cached_long_memory_notes,
             "scenario_tag": scenario_tag,
             "tone_variant": tone_variant,
         }
@@ -903,7 +1096,9 @@ class AgentRuntime:
                     "Task: Use the provided [Context] to send one warm encouragement or gentle reminder. "
                     "Return strict JSON only: {\"speak\":\"...\",\"emotion\":\"happy|eat|play\"}. "
                     "Constraints: English only, at most 20 words in speak, no markdown, no extra keys. "
-                    "Address user by name when available."
+                    "Address user by name when available. "
+                    "If reason is morning_greeting or daytime_greeting and long_term_notes is non-empty, "
+                    "you MUST mention one trend from long_term_notes in the speak text."
                 ),
             }
         )
@@ -952,3 +1147,6 @@ class AgentRuntime:
 
     def next_calendar_meeting(self) -> dict | None:
         return self._calendar_provider.next_meeting()
+
+    def recent_long_term_memory(self, *, days: int = LONG_MEMORY_LOOKBACK_DAYS, limit: int = 10) -> list[dict]:
+        return self._repository.load_recent_memory_notes(days=days, limit=limit)
