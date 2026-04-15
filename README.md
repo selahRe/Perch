@@ -18,6 +18,24 @@ Run:
 ./.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+## Electron Bridge (Issue #5)
+
+`frontend/electron/main.js` now manages a bridge between Electron main process and backend process.
+
+- Lifecycle guardianship:
+  - On app startup, Electron checks `GET /monitoring/state` first.
+  - If backend is already up, Electron reuses it and does not spawn a second backend process.
+  - If Electron spawned backend itself, it terminates that managed process on app quit.
+- Environment switching:
+  - Development mode (`!app.isPackaged` or `NODE_ENV=development`): runs `python backend/main.py`.
+  - Production mode: runs packaged backend executable (for example `backend.exe` on Windows, `backend` on macOS/Linux).
+- Optional overrides:
+  - `PERCH_BACKEND_PYTHON`: python command path used in development.
+  - `PERCH_BACKEND_SCRIPT_PATH`: backend script path used in development.
+  - `PERCH_BACKEND_EXECUTABLE_PATH`: explicit backend executable path used in production.
+
+Default development script entry is `backend/main.py`.
+
 Endpoints:
 
 - `GET /state`: current pet UI state

@@ -11,6 +11,12 @@ const BACKEND_HOST = '127.0.0.1'
 const BACKEND_PORT = '8000'
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..')
 const VENV_PYTHON_PATH = path.join(WORKSPACE_ROOT, '.venv', 'bin', 'python')
+const BACKEND_SCRIPT_PATH = path.join(WORKSPACE_ROOT, 'backend', 'main.py')
+const BACKEND_EXECUTABLE_CANDIDATES = [
+  path.join(process.resourcesPath, 'backend', process.platform === 'win32' ? 'backend.exe' : 'backend'),
+  path.join(process.resourcesPath, process.platform === 'win32' ? 'backend.exe' : 'backend'),
+  path.join(WORKSPACE_ROOT, 'backend', process.platform === 'win32' ? 'backend.exe' : 'backend'),
+]
 
 let mainWindow
 let petUpdateTimer = null
@@ -21,6 +27,48 @@ let isQuitting = false
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isDevelopmentMode() {
+  return !app.isPackaged || process.env.NODE_ENV === 'development'
+}
+
+function resolveBackendLaunchTarget() {
+  if (isDevelopmentMode()) {
+    const pythonCommand =
+      process.env.PERCH_BACKEND_PYTHON ||
+      (fs.existsSync(VENV_PYTHON_PATH) ? VENV_PYTHON_PATH : 'python3')
+    const scriptPath = process.env.PERCH_BACKEND_SCRIPT_PATH || BACKEND_SCRIPT_PATH
+
+    if (!fs.existsSync(scriptPath)) {
+      throw new Error(`[Perch] Dev backend script not found: ${scriptPath}`)
+    }
+
+    return {
+      command: pythonCommand,
+      args: [scriptPath],
+      cwd: WORKSPACE_ROOT,
+      mode: 'development',
+    }
+  }
+
+  const explicitExecutable = process.env.PERCH_BACKEND_EXECUTABLE_PATH
+  const executablePath = explicitExecutable
+    ? explicitExecutable
+    : BACKEND_EXECUTABLE_CANDIDATES.find((candidate) => fs.existsSync(candidate))
+
+  if (!executablePath) {
+    throw new Error(
+      `[Perch] Production backend executable not found. Checked: ${BACKEND_EXECUTABLE_CANDIDATES.join(', ')}`
+    )
+  }
+
+  return {
+    command: executablePath,
+    args: [],
+    cwd: path.dirname(executablePath),
+    mode: 'production',
+  }
 }
 
 async function isBackendReachable() {
@@ -54,18 +102,16 @@ async function ensureBackendRunning() {
     return
   }
 
-  if (!fs.existsSync(VENV_PYTHON_PATH)) {
-    throw new Error(
-      `[Perch] Cannot find virtualenv Python at ${VENV_PYTHON_PATH}. ` +
-      'Create .venv and install backend dependencies first.'
-    )
-  }
+  const launch = resolveBackendLaunchTarget()
+  console.log(
+    `[Perch] Starting managed backend in ${launch.mode} mode: ${launch.command} ${launch.args.join(' ')}`
+  )
 
   pythonProcess = spawn(
-    VENV_PYTHON_PATH,
-    ['-m', 'uvicorn', 'app.main:app', '--host', BACKEND_HOST, '--port', BACKEND_PORT],
+    launch.command,
+    launch.args,
     {
-      cwd: WORKSPACE_ROOT,
+      cwd: launch.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     }
   )
