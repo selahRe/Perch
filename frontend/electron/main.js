@@ -6,9 +6,8 @@ import { fileURLToPath } from 'url'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-const PYTHON_BACKEND_BASE_URL = 'http://127.0.0.1:8000'
 const BACKEND_HOST = '127.0.0.1'
-const BACKEND_PORT = '8000'
+const BACKEND_PORT = 8000
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..')
 const VENV_PYTHON_PATH = path.join(WORKSPACE_ROOT, '.venv', 'bin', 'python')
 const BACKEND_SCRIPT_PATH = path.join(WORKSPACE_ROOT, 'backend', 'main.py')
@@ -24,9 +23,85 @@ let monitoringStateTimer = null
 let pythonProcess = null
 let backendManagedByElectron = false
 let isQuitting = false
+let backendBaseUrl = `http://${BACKEND_HOST}:${BACKEND_PORT}`
+let pythonStdoutBuffer = ''
+let pendingBackendReadyResolve = null
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function resetBackendReadyPromise() {
+  return new Promise((resolve) => {
+    pendingBackendReadyResolve = resolve
+  })
+}
+
+function resolveBackendReady(event) {
+  if (pendingBackendReadyResolve) {
+    pendingBackendReadyResolve(event)
+    pendingBackendReadyResolve = null
+  }
+}
+
+function sendToRenderer(channel, payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+  mainWindow.webContents.send(channel, payload)
+}
+
+function handleBackendEventLine(line) {
+  if (!line.startsWith('PERCH_EVENT ')) {
+    return false
+  }
+
+  try {
+    const rawPayload = line.slice('PERCH_EVENT '.length)
+    const event = JSON.parse(rawPayload)
+
+    if (event.type === 'ready') {
+      const port = Number(event.port)
+      if (Number.isFinite(port) && port > 0) {
+        backendBaseUrl = `http://${BACKEND_HOST}:${port}`
+        console.log(`[Perch] Backend ready signal received on port ${port}`)
+      }
+      resolveBackendReady(event)
+      return true
+    }
+
+    if (event.type === 'pet:update') {
+      sendToRenderer('pet:update', event.data)
+      return true
+    }
+
+    if (event.type === 'monitoring:state') {
+      sendToRenderer('monitoring:state', event.data)
+      return true
+    }
+
+    if (event.type === 'bridge:error') {
+      console.error('[Perch] Backend bridge error event:', event.message)
+      return true
+    }
+  } catch (error) {
+    console.error('[Perch] Failed to parse backend event line:', line, error)
+    return true
+  }
+
+  return false
+}
+
+function handlePythonStdoutChunk(chunk) {
+  pythonStdoutBuffer += chunk.toString()
+  const lines = pythonStdoutBuffer.split(/\r?\n/)
+  pythonStdoutBuffer = lines.pop() || ''
+
+  for (const line of lines) {
+    if (!handleBackendEventLine(line)) {
+      process.stdout.write(`[Perch:python] ${line}\n`)
+    }
+  }
 }
 
 function isDevelopmentMode() {
@@ -75,7 +150,7 @@ async function isBackendReachable() {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 1200)
   try {
-    const response = await fetch(`${PYTHON_BACKEND_BASE_URL}/monitoring/state`, {
+    const response = await fetch(`${backendBaseUrl}/monitoring/state`, {
       signal: controller.signal,
     })
     return response.ok
@@ -97,6 +172,8 @@ async function waitForBackendReady(maxAttempts = 30, intervalMs = 250) {
 }
 
 async function ensureBackendRunning() {
+  backendBaseUrl = `http://${BACKEND_HOST}:${BACKEND_PORT}`
+
   if (await isBackendReachable()) {
     console.log('[Perch] Backend already running; lifecycle is externally managed.')
     return
@@ -116,9 +193,11 @@ async function ensureBackendRunning() {
     }
   )
   backendManagedByElectron = true
+  pythonStdoutBuffer = ''
+  const backendReadySignal = resetBackendReadyPromise()
 
   pythonProcess.stdout.on('data', (chunk) => {
-    process.stdout.write(`[Perch:python] ${chunk}`)
+    handlePythonStdoutChunk(chunk)
   })
 
   pythonProcess.stderr.on('data', (chunk) => {
@@ -126,10 +205,20 @@ async function ensureBackendRunning() {
   })
 
   pythonProcess.on('exit', (code, signal) => {
+    resolveBackendReady({ type: 'exit', code, signal })
     if (!isQuitting) {
       console.error(`[Perch] Managed Python backend exited unexpectedly (code=${code}, signal=${signal})`)
     }
   })
+
+  try {
+    await Promise.race([
+      backendReadySignal,
+      sleep(12000).then(() => null),
+    ])
+  } catch {
+    // Ready signal is optional for compatibility; reachability check below is authoritative.
+  }
 
   const ready = await waitForBackendReady()
   if (!ready) {
@@ -183,7 +272,7 @@ async function stopManagedBackend() {
 }
 
 async function apiGet(route) {
-  const response = await fetch(`${PYTHON_BACKEND_BASE_URL}${route}`)
+  const response = await fetch(`${backendBaseUrl}${route}`)
   if (!response.ok) {
     throw new Error(`GET ${route} failed: ${response.status}`)
   }
@@ -191,7 +280,7 @@ async function apiGet(route) {
 }
 
 async function apiPost(route, payload) {
-  const response = await fetch(`${PYTHON_BACKEND_BASE_URL}${route}`, {
+  const response = await fetch(`${backendBaseUrl}${route}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

@@ -22,13 +22,21 @@ Run:
 
 `frontend/electron/main.js` now manages a bridge between Electron main process and backend process.
 
+Command flow:
+
+- Startup: Electron launches backend by `spawn(...)`.
+- Handshake: backend launcher chooses an available port (starting from `8000`) and emits a ready signal on stdout.
+- Loop: backend emits `pet:update` and `monitoring:state` events on stdout.
+- Render: Electron forwards those events via `mainWindow.webContents.send(...)` to React.
+
 - Lifecycle guardianship:
   - On app startup, Electron checks `GET /monitoring/state` first.
   - If backend is already up, Electron reuses it and does not spawn a second backend process.
   - If Electron spawned backend itself, it terminates that managed process on app quit.
 - Environment switching:
   - Development mode (`!app.isPackaged` or `NODE_ENV=development`): runs `python backend/main.py`.
-  - Production mode: runs packaged backend executable (for example `backend.exe` on Windows, `backend` on macOS/Linux).
+  - Production mode: runs packaged backend executable.
+  - About `.exe`: this suffix is Windows-only. On macOS/Linux it is typically `backend` without `.exe`.
 - Optional overrides:
   - `PERCH_BACKEND_PYTHON`: python command path used in development.
   - `PERCH_BACKEND_SCRIPT_PATH`: backend script path used in development.
