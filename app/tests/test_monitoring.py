@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 import json
 
 import app.main as main_module
-from app.bootstrap_history import WeeklyHistoryBootstrapper
 from app.config_store import ConfigStore
 from app.classifier import StatusClassifier
 from app.models import MonitoringSettings, MonitoringState, PetState, StatusClassification, ThresholdsUpdateRequest, UserProfile
@@ -12,6 +11,7 @@ from app.reminder_manager import ReminderManager
 from app.settings_store import SettingsStore
 from app.storage import MetricsRepository
 from app.user_cluster import UserClusterEngine
+from app.work_hours import infer_is_work_hour
 
 
 def write_settings(path, idle_limit=5, focus_threshold=60):
@@ -50,19 +50,33 @@ def write_settings(path, idle_limit=5, focus_threshold=60):
 
 def test_repository_ttl_cleanup_and_order(tmp_path):
     repository = MetricsRepository(tmp_path / "metrics.sqlite3")
-    old_time = datetime.now(timezone.utc) - timedelta(hours=25)
+    old_time = datetime.now(timezone.utc) - timedelta(days=15)
     new_time = datetime.now(timezone.utc) - timedelta(minutes=10)
 
     repository.save_minute_record(timestamp=old_time, kpm_value=2, status_label="Idle")
     repository.save_minute_record(timestamp=new_time, kpm_value=40, status_label="Relaxed", app_name="Code")
-    repository.cleanup_older_than(hours=24)
+    repository.cleanup_older_than(hours=14 * 24)
 
-    rows = repository.load_history(datetime.now(timezone.utc) - timedelta(hours=24))
+    rows = repository.load_history(datetime.now(timezone.utc) - timedelta(days=14))
 
     assert len(rows) == 1
     assert rows[0]["kpm_value"] == 40
     assert rows[0]["status_label"] == "Relaxed"
+    assert rows[0]["status_code"] == 1
     assert rows[0]["app_name"] == "Code"
+    assert rows[0]["is_work_hour"] in [0, 1]
+
+
+def test_repository_can_backfill_is_work_hour(tmp_path):
+    repository = MetricsRepository(tmp_path / "metrics.sqlite3")
+    timestamp = datetime(2026, 4, 15, 14, 0, tzinfo=timezone.utc)
+    repository.save_minute_record(timestamp=timestamp, kpm_value=10, status_label="Relaxed", app_name="Zoom")
+
+    updated_count = repository.backfill_is_work_hour(infer_is_work_hour)
+    rows = repository.load_history(timestamp - timedelta(minutes=1))
+
+    assert updated_count >= 1
+    assert rows[0]["is_work_hour"] == 1
 
 
 def test_status_classifier_uses_dynamic_settings_and_dev_app_adjustment(tmp_path):
@@ -111,19 +125,87 @@ def test_user_cluster_engine_retrains_every_24_hours():
     assert trained_at_after_third == third_train
 
 
-def test_weekly_bootstrapper_seeds_history_into_database(tmp_path):
+def test_classifier_expands_window_to_14_days_when_7_days_sparse(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path, idle_limit=5, focus_threshold=60)
     repository = MetricsRepository(tmp_path / "metrics.sqlite3")
-    bootstrapper = WeeklyHistoryBootstrapper(seed=2026)
-
-    bootstrapper.ensure_seeded(
-        repository=repository,
-        now=datetime(2026, 4, 15, 18, 0, tzinfo=timezone.utc),
+    now = datetime(2026, 4, 15, 18, 0, tzinfo=timezone.utc)
+    ten_days_ago = now - timedelta(days=10)
+    repository.save_minute_record(
+        timestamp=ten_days_ago,
+        kpm_value=88,
+        status_label="Focused",
+        app_name="Code",
     )
 
-    rows = repository.load_history(
-        since_timestamp=datetime(2026, 4, 8, 18, 0, tzinfo=timezone.utc),
-    )
-    assert len(rows) >= 7 * 24 * 60
+    class RecordingEngine(UserClusterEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_seen_rows: list[dict] = []
+
+        def ensure_model(self, history_rows: list[dict], now: datetime | None = None) -> None:
+            self.last_seen_rows = history_rows
+            self.centers = [(1.0, 0.0, 0.0), (50.0, 0.6, 1.0), (110.0, 1.0, 1.0)]
+            self.cluster_labels = {0: "offline_rest", 1: "low_energy", 2: "deep_work"}
+            self.last_trained_at = now
+
+    engine = RecordingEngine()
+    classifier = StatusClassifier(SettingsStore(settings_path), repository=repository, cluster_engine=engine)
+    classifier.classify_with_cluster(kpm_value=90, app_name="Code", now=now)
+
+    assert len(engine.last_seen_rows) == 1
+    assert int(engine.last_seen_rows[0]["kpm_value"]) == 88
+
+
+def test_classifier_updates_work_window_with_ema_and_throttle(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path)
+    store = SettingsStore(settings_path)
+    settings = store.load()
+    settings.work_time_start = "13:30"
+    settings.work_time_end = "18:00"
+    settings.work_window_ema_alpha = 0.5
+    settings.last_work_window_update_at = datetime(2026, 4, 10, 8, 0, tzinfo=timezone.utc)
+    store.save(settings)
+
+    repository = MetricsRepository(tmp_path / "metrics.sqlite3")
+    now = datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc)
+    for i in range(2100):
+        ts = now - timedelta(minutes=i * 2)
+        ts = ts.replace(hour=16, minute=(i % 60), second=0, microsecond=0)
+        repository.save_minute_record(timestamp=ts, kpm_value=45, status_label="Relaxed", app_name="Code")
+
+    classifier = StatusClassifier(store, repository=repository)
+    classifier.classify_with_cluster(kpm_value=40, app_name="Code", now=now)
+
+    updated = store.load()
+    assert updated.last_work_window_update_at is not None
+    assert updated.work_time_start != "13:30" or updated.work_time_end != "18:00"
+
+    # Within 3 days, schedule should not refresh again.
+    first_updated_at = updated.last_work_window_update_at
+    classifier.classify_with_cluster(kpm_value=40, app_name="Code", now=now + timedelta(days=1))
+    reloaded = store.load()
+    assert reloaded.last_work_window_update_at == first_updated_at
+
+
+def test_user_cluster_engine_ema_smooths_centers():
+    class FixedFitEngine(UserClusterEngine):
+        def _fit(self, samples):
+            return (
+                [(10.0, 0.1, 1.0), (50.0, 0.5, 1.0), (100.0, 0.9, 1.0)],
+                {0: "offline_rest", 1: "low_energy", 2: "deep_work"},
+            )
+
+    engine = FixedFitEngine(ema_alpha=0.25)
+    engine.centers = [(0.0, 0.0, 0.0), (30.0, 0.3, 1.0), (80.0, 0.8, 1.0)]
+    engine.cluster_labels = {0: "offline_rest", 1: "low_energy", 2: "deep_work"}
+
+    engine.ensure_model(history_rows=[{"kpm_value": 20, "app_name": "Safari"}], now=datetime(2026, 4, 15, 10, 0, tzinfo=timezone.utc))
+
+    assert round(engine.centers[0][0], 3) == 2.5
+    assert round(engine.centers[1][0], 3) == 35.0
+    assert round(engine.centers[2][0], 3) == 85.0
 
 
 def test_protocol_adapter_maps_kpm_and_duration_to_pet_payload():
@@ -201,7 +283,6 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     monkeypatch.setattr(main_module, "keyboard_monitor", monitor)
     monkeypatch.setattr(main_module, "pet_update_adapter", adapter)
     monkeypatch.setattr(main_module, "config_store", store)
-    monkeypatch.setattr(main_module, "history_bootstrapper", WeeklyHistoryBootstrapper())
     monkeypatch.setattr(
         main_module,
         "current_state",
@@ -253,8 +334,10 @@ def test_config_store_creates_defaults_and_persists_profile_and_settings(tmp_pat
 
     bundle = store.load_bundle()
     assert bundle.profile.username == ""
+    assert bundle.profile.work_time_start == "13:30"
     assert bundle.profile.onboarding_completed is False
     assert bundle.settings.pet_visible_always is True
+    assert bundle.settings.work_time_start == "13:30"
     assert bundle.settings.kpm_thresholds == {"idle": 5, "focus": 50}
 
     saved_profile = store.save_profile(UserProfile(username="Mika", gender="other", onboarding_completed=True))

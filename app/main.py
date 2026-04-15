@@ -5,7 +5,6 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
-from .bootstrap_history import WeeklyHistoryBootstrapper
 from .config_store import ConfigStore
 from .models import (
     ConfigBundle,
@@ -20,35 +19,41 @@ from .models import (
 from .monitoring import KeyboardMonitor, RETENTION_HOURS
 from .protocol_adapter import PetUpdateAdapter
 from .reminder_manager import ReminderManager
+from .work_hours import infer_is_work_hour
 
 
 keyboard_monitor: KeyboardMonitor | None = None
 pet_update_adapter: PetUpdateAdapter | None = None
 config_store: ConfigStore | None = None
 reminder_manager: ReminderManager | None = None
-history_bootstrapper: WeeklyHistoryBootstrapper | None = None
 _runtime_lock = threading.Lock()
 
 
 def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, ReminderManager]:
-    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager, history_bootstrapper
+    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager
     with _runtime_lock:
         if keyboard_monitor is None:
             keyboard_monitor = KeyboardMonitor()
-        if history_bootstrapper is None:
-            history_bootstrapper = WeeklyHistoryBootstrapper()
-            history_bootstrapper.ensure_seeded(keyboard_monitor.repository)
         if reminder_manager is None:
             reminder_manager = ReminderManager(keyboard_monitor.settings_store)
             active_reminder_manager = reminder_manager
             monitor = keyboard_monitor
 
             def on_minute_complete(state: MonitoringState) -> None:
+                settings = monitor.settings_store.load()
                 monitor.repository.save_minute_record(
                     timestamp=state.timestamp,
                     kpm_value=state.kpm_value,
                     status_label=state.status.label,
                     app_name=state.app_name,
+                    is_work_hour=infer_is_work_hour(
+                        timestamp=state.timestamp,
+                        app_name=state.app_name,
+                        kpm_value=state.kpm_value,
+                        work_time_start=settings.work_time_start,
+                        work_time_end=settings.work_time_end,
+                    ),
+                    status_code=state.status_code,
                 )
                 monitor.repository.cleanup_older_than(hours=RETENTION_HOURS)
                 active_reminder_manager.process_minute(state)
