@@ -76,6 +76,11 @@ class MonitoringSettings(BaseModel):
     protocol_adapter: ProtocolAdapterSettings = Field(default_factory=ProtocolAdapterSettings)
 
 
+class ThresholdsUpdateRequest(BaseModel):
+    idle_limit: int = Field(ge=0)
+    focus_threshold: int = Field(gt=0)
+
+
 class ReminderPreferences(BaseModel):
     hydration: bool = True
     stretching: bool = True

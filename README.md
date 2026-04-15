@@ -21,20 +21,46 @@ Run:
 Endpoints:
 
 - `GET /state`: current pet UI state
-- `GET /monitoring/state`: latest completed 60-second KPM and classification
+- `GET /monitoring/state`: live monitoring snapshot (KPM, status label, confidence, app, listener info)
 - `GET /monitoring/history?period=1h|24h`: historical KPM points for visualization
 - `GET /monitoring/config`: current classification thresholds
 - `PUT /monitoring/config`: update classification thresholds
+- `PUT /settings/thresholds`: update only `idle_limit` and `focus_threshold` (and synced `kpm_thresholds`)
 - `GET /pet/update`: protocol-adapted payload (`visible`, `emotion`, `speak`) for frontend view updates
 - `GET /config/load`: load onboarding profile and settings bundle
 - `POST /config/save-profile`: save onboarding profile JSON
 - `POST /config/save-settings`: save settings JSON
+- `GET /debug/thresholds`: built-in HTML tuner page for live threshold adjustment
+
+State classification output:
+
+- Current states are exactly: `Idle`, `Relaxed`, `Focused`.
+- The classifier returns a standardized object:
+  - `label`
+  - `confidence` (0.0 to 1.0)
+
+Pet status output:
+
+- Yes, the project outputs pet state for frontend rendering.
+- Use `GET /pet/update`, which returns:
+  - `visible`
+  - `emotion`
+  - `speak`
+
+Debug threshold page behavior:
+
+- Open `http://127.0.0.1:8000/debug/thresholds`.
+- Sliding `Idle limit` and `Focus threshold` triggers `PUT /settings/thresholds` automatically.
+- Threshold changes are persisted by the backend settings store (not just in-memory), so they affect later classification requests.
+- The page also polls `GET /monitoring/state` every second to show status changes in real time.
 
 Monitoring details:
 
 - Global key events are captured by a non-blocking listener.
 - KPM is computed every 60 seconds and triggers a callback to storage/classification.
 - Data is persisted in SQLite table `monitoring_history` with 24-hour retention cleanup.
+- Historical response format used by visualization endpoint:
+  - `[{"time": "10:01", "kpm": 45, "label": "Relaxed", "app_name": "Code"}, ...]`
 - Thresholds and pet adapter behavior are loaded from `~/.perch/settings.json` (or `~/Documents/.perch/settings.json` when available).
 - `~/.perch/profile.json` stores onboarding data.
 - Pet adapter behavior is configurable in `settings.json > protocol_adapter`:

@@ -4,7 +4,7 @@ import json
 import app.main as main_module
 from app.config_store import ConfigStore
 from app.classifier import StatusClassifier
-from app.models import MonitoringSettings, MonitoringState, PetState, StatusClassification, UserProfile
+from app.models import MonitoringSettings, MonitoringState, PetState, StatusClassification, ThresholdsUpdateRequest, UserProfile
 from app.monitoring import KeyboardMonitor
 from app.protocol_adapter import PetUpdateAdapter, get_pet_update
 from app.reminder_manager import ReminderManager
@@ -171,6 +171,9 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     updated = main_module.update_monitoring_config(
         MonitoringSettings(idle_limit=3, focus_threshold=55, developer_apps=["Code"], developer_focus_delta=10)
     )
+    thresholds_updated = main_module.update_thresholds(
+        ThresholdsUpdateRequest(idle_limit=7, focus_threshold=70)
+    )
 
     assert state.visible is False
     assert state.emotion == "play"
@@ -187,7 +190,11 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     assert save_settings_result.success is True
     assert config.focus_threshold == 60
     assert updated.focus_threshold == 55
-    assert main_module.get_monitoring_config().focus_threshold == 55
+    assert thresholds_updated.focus_threshold == 70
+    assert thresholds_updated.idle_limit == 7
+    reloaded_config = main_module.get_monitoring_config()
+    assert reloaded_config.focus_threshold == 70
+    assert reloaded_config.kpm_thresholds["idle"] == 7
 
 
 def test_config_store_creates_defaults_and_persists_profile_and_settings(tmp_path):
