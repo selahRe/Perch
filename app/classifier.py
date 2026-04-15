@@ -1,12 +1,24 @@
 from __future__ import annotations
 
-from .models import MonitoringSettings, StatusClassification
+from datetime import datetime, timedelta, timezone
+
+from .models import ClusterClassification, MonitoringSettings, StatusClassification, UserClusterLabel
 from .settings_store import SettingsStore
+from .storage import MetricsRepository
+from .user_cluster import UserClusterEngine
 
 
 class StatusClassifier:
-    def __init__(self, settings_store: SettingsStore) -> None:
+    def __init__(
+        self,
+        settings_store: SettingsStore,
+        repository: MetricsRepository | None = None,
+        cluster_engine: UserClusterEngine | None = None,
+    ) -> None:
         self.settings_store = settings_store
+        self.repository = repository
+        self.cluster_engine = cluster_engine or UserClusterEngine()
+        self._minimum_history_samples = 240
 
     def classify(self, kpm_value: int, app_name: str | None = None) -> StatusClassification:
         settings = self.settings_store.load()
@@ -30,6 +42,23 @@ class StatusClassifier:
         confidence = max(0.5, 1.0 - (distance / relaxed_band))
         return StatusClassification(label="Relaxed", confidence=round(confidence, 3))
 
+    def classify_with_cluster(
+        self,
+        kpm_value: int,
+        app_name: str | None = None,
+        now: datetime | None = None,
+    ) -> ClusterClassification:
+        now = now or datetime.now(timezone.utc)
+        history_rows = self._load_recent_history(now)
+        self.cluster_engine.ensure_model(history_rows=history_rows, now=now)
+        user_cluster, cluster_confidence = self.cluster_engine.predict(
+            kpm_value=kpm_value,
+            app_name=app_name,
+        )
+
+        status = self._cluster_to_status(user_cluster=user_cluster, confidence=cluster_confidence)
+        return ClusterClassification(status=status, user_cluster=user_cluster)
+
     def _effective_focus_threshold(self, settings: MonitoringSettings, app_name: str | None) -> int:
         focus_threshold = settings.kpm_thresholds.get("focus", settings.focus_threshold)
         minimum_focus = settings.kpm_thresholds.get("idle", settings.idle_limit) + 1
@@ -43,3 +72,34 @@ class StatusClassifier:
                 return max(minimum_focus, focus_threshold - settings.developer_focus_delta)
 
         return max(minimum_focus, focus_threshold)
+
+    def _load_recent_history(self, now: datetime) -> list[dict]:
+        if self.repository is None:
+            return []
+        since = now - timedelta(days=7)
+        rows = self.repository.load_history(since_timestamp=since)
+        records = [dict(row) for row in rows]
+        if len(records) >= self._minimum_history_samples:
+            return records
+
+        seed_rows = self.cluster_engine.generate_weekly_seed_rows(now=now)
+        for row in seed_rows:
+            self.repository.save_minute_record(
+                timestamp=row["timestamp"],
+                kpm_value=int(row["kpm_value"]),
+                status_label=row["status_label"],
+                app_name=row["app_name"],
+            )
+        reloaded_rows = self.repository.load_history(since_timestamp=since)
+        return [dict(row) for row in reloaded_rows]
+
+    def _cluster_to_status(
+        self,
+        user_cluster: UserClusterLabel,
+        confidence: float,
+    ) -> StatusClassification:
+        if user_cluster == "deep_work":
+            return StatusClassification(label="Focused", confidence=confidence)
+        if user_cluster == "low_energy":
+            return StatusClassification(label="Relaxed", confidence=confidence)
+        return StatusClassification(label="Idle", confidence=confidence)

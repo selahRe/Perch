@@ -39,9 +39,9 @@ class KeyboardMonitor:
         default_storage_root = get_default_perch_storage_root()
         self.db_path = db_path or (project_root / "perch_metrics.sqlite3")
         self.settings_store = SettingsStore(settings_path or (default_storage_root / "settings.json"))
-        self.classifier = StatusClassifier(self.settings_store)
         self.minute_seconds = minute_seconds
         self.repository = MetricsRepository(self.db_path)
+        self.classifier = StatusClassifier(self.settings_store, repository=self.repository)
         self.on_minute_complete = on_minute_complete or self._default_minute_callback
 
         self._lock = threading.Lock()
@@ -59,6 +59,7 @@ class KeyboardMonitor:
             timestamp=datetime.now(timezone.utc),
             kpm_value=0,
             status=StatusClassification(label="Idle", confidence=1.0),
+            user_cluster="offline_rest",
             app_name=None,
         )
         self._status_started_at = self._latest_state.timestamp
@@ -197,12 +198,13 @@ class KeyboardMonitor:
 
         app_name = self._pick_dominant_app(app_durations_seconds)
 
-        classification = self.classifier.classify(kpm_value=kpm_value, app_name=app_name)
+        classification = self.classifier.classify_with_cluster(kpm_value=kpm_value, app_name=app_name)
         timestamp = datetime.now(timezone.utc)
         state = MonitoringState(
             timestamp=timestamp,
             kpm_value=kpm_value,
-            status=classification,
+            status=classification.status,
+            user_cluster=classification.user_cluster,
             app_name=app_name,
             current_minute_count=0,
             listener_running=bool(self._listener and self._listener.is_alive()),
@@ -213,7 +215,7 @@ class KeyboardMonitor:
         )
 
         with self._lock:
-            if classification.label != previous_label:
+            if classification.status.label != previous_label:
                 self._status_started_at = timestamp
             self._latest_state = state
             self._last_minute_completed_at = timestamp
@@ -221,7 +223,7 @@ class KeyboardMonitor:
         LOGGER.info(
             "Minute sample completed: kpm=%s status=%s app=%s listener_running=%s listener_error=%s app_seconds=%s",
             kpm_value,
-            classification.label,
+            classification.status.label,
             app_name or "unknown",
             bool(self._listener and self._listener.is_alive()),
             self._listener_error or "none",

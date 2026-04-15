@@ -10,6 +10,7 @@ from app.protocol_adapter import PetUpdateAdapter, get_pet_update
 from app.reminder_manager import ReminderManager
 from app.settings_store import SettingsStore
 from app.storage import MetricsRepository
+from app.user_cluster import UserClusterEngine
 
 
 def write_settings(path, idle_limit=5, focus_threshold=60):
@@ -76,6 +77,37 @@ def test_status_classifier_uses_dynamic_settings_and_dev_app_adjustment(tmp_path
     assert relaxed.label == "Relaxed"
     assert focused_dev.label == "Focused"
     assert 0.0 <= focused_dev.confidence <= 1.0
+
+
+def test_classifier_returns_user_cluster_label(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    write_settings(settings_path, idle_limit=5, focus_threshold=60)
+    repository = MetricsRepository(tmp_path / "metrics.sqlite3")
+    classifier = StatusClassifier(SettingsStore(settings_path), repository=repository)
+
+    result = classifier.classify_with_cluster(kpm_value=115, app_name="Code")
+
+    assert result.user_cluster in ["deep_work", "low_energy", "offline_rest"]
+    assert result.status.label in ["Idle", "Relaxed", "Focused"]
+
+
+def test_user_cluster_engine_retrains_every_24_hours():
+    engine = UserClusterEngine(retrain_interval_hours=24)
+    history_rows = [{"kpm_value": 20, "app_name": "Safari"} for _ in range(5)]
+    first_train = datetime(2026, 4, 13, 10, 0, tzinfo=timezone.utc)
+    second_train = first_train + timedelta(hours=12)
+    third_train = first_train + timedelta(hours=25)
+
+    engine.ensure_model(history_rows=history_rows, now=first_train)
+    trained_at_after_first = engine.last_trained_at
+    engine.ensure_model(history_rows=history_rows, now=second_train)
+    trained_at_after_second = engine.last_trained_at
+    engine.ensure_model(history_rows=history_rows, now=third_train)
+    trained_at_after_third = engine.last_trained_at
+
+    assert trained_at_after_first == first_train
+    assert trained_at_after_second == first_train
+    assert trained_at_after_third == third_train
 
 
 def test_protocol_adapter_maps_kpm_and_duration_to_pet_payload():
@@ -195,6 +227,7 @@ def test_route_helpers_support_period_history_and_settings(tmp_path, monkeypatch
     reloaded_config = main_module.get_monitoring_config()
     assert reloaded_config.focus_threshold == 70
     assert reloaded_config.kpm_thresholds["idle"] == 7
+    assert hasattr(main_module.get_monitoring_state(), "user_cluster")
 
 
 def test_config_store_creates_defaults_and_persists_profile_and_settings(tmp_path):

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 StatusLabel = Literal["Idle", "Relaxed", "Focused"]
+UserClusterLabel = Literal["deep_work", "low_energy", "offline_rest"]
 PetEmotion = Literal["happy", "eat", "play", "idle"]
 GenderType = Literal["male", "female", "other", "prefer_not_to_say"]
 ReminderType = Literal["hydration", "stretching", "meeting", "custom"]
@@ -56,6 +57,11 @@ class ProtocolAdapterSettings(BaseModel):
 class StatusClassification(BaseModel):
     label: StatusLabel
     confidence: float = Field(ge=0.0, le=1.0)
+
+
+class ClusterClassification(BaseModel):
+    status: StatusClassification
+    user_cluster: UserClusterLabel
 
 
 class MonitoringSettings(BaseModel):
@@ -112,6 +118,7 @@ class MonitoringState(BaseModel):
     timestamp: datetime
     kpm_value: int
     status: StatusClassification
+    user_cluster: UserClusterLabel = "offline_rest"
     app_name: str | None = None
     current_minute_count: int = 0
     listener_running: bool = False
