@@ -2,12 +2,12 @@
   "name": "perch-ai-pet",
   "private": true,
   "version": "0.0.0",
-  "type": "module",
   "main": "electron/main.js",
   "scripts": {
+    "predev": "sh -c 'PIDS=$(lsof -ti tcp:5180 2>/dev/null); if [ -n \"$PIDS\" ]; then kill -9 $PIDS; fi'",
     "dev": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
-    "dev:react": "vite",
-    "dev:electron": "wait-on tcp:5173 && electron .",
+    "dev:react": "vite --port 5180 --strictPort",
+    "dev:electron": "wait-on tcp:5180 && ELECTRON_RUN_AS_NODE= PERCH_DEV_SERVER_URL=http://localhost:5180 electron .",
     "build": "vite build",
     "preview": "vite preview"
   },

@@ -1,11 +1,7 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
-import { spawn } from 'child_process'
-import fs from 'fs'
-import path from 'path'
-import { fileURLToPath } from 'url'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+const { app, BrowserWindow, ipcMain } = require('electron')
+const { spawn } = require('child_process')
+const fs = require('fs')
+const path = require('path')
 const BACKEND_HOST = '127.0.0.1'
 const BACKEND_PORT = 8000
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..')
@@ -110,10 +106,15 @@ function isDevelopmentMode() {
 
 function resolveBackendLaunchTarget() {
   if (isDevelopmentMode()) {
-    const pythonCommand =
-      process.env.PERCH_BACKEND_PYTHON ||
-      (fs.existsSync(VENV_PYTHON_PATH) ? VENV_PYTHON_PATH : 'python3')
+    const pythonCommand = process.env.PERCH_BACKEND_PYTHON || VENV_PYTHON_PATH
     const scriptPath = process.env.PERCH_BACKEND_SCRIPT_PATH || BACKEND_SCRIPT_PATH
+
+    if (!fs.existsSync(pythonCommand)) {
+      throw new Error(
+        `[Perch] Root virtualenv python not found: ${pythonCommand}. ` +
+        'Create it with: python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt'
+      )
+    }
 
     if (!fs.existsSync(scriptPath)) {
       throw new Error(`[Perch] Dev backend script not found: ${scriptPath}`)
@@ -410,7 +411,8 @@ function createWindow() {
     }
   })
 
-  mainWindow.loadURL('http://localhost:5173')
+  const devServerUrl = process.env.PERCH_DEV_SERVER_URL || 'http://localhost:5173'
+  mainWindow.loadURL(devServerUrl)
   startPetUpdatePolling()
   startMonitoringStatePolling()
 }

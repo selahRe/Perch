@@ -1,17 +1,23 @@
 from contextlib import asynccontextmanager
+import asyncio
+from pathlib import Path
 import threading
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
+from .agent_runtime import AgentRuntime
 from .config_store import ConfigStore
+from .env_loader import load_env_file
 from .models import (
     ConfigBundle,
     HistoryPoint,
     MonitoringSettings,
     MonitoringState,
+    PetDecision,
     PetState,
+    PetUpdatePayload,
     SaveResult,
     ThresholdsUpdateRequest,
     UserProfile,
@@ -21,16 +27,21 @@ from .protocol_adapter import PetUpdateAdapter
 from .reminder_manager import ReminderManager
 from .work_hours import infer_is_work_hour
 
+load_env_file(Path(__file__).resolve().parents[1] / ".env")
+
 
 keyboard_monitor: KeyboardMonitor | None = None
 pet_update_adapter: PetUpdateAdapter | None = None
 config_store: ConfigStore | None = None
 reminder_manager: ReminderManager | None = None
+agent_runtime: AgentRuntime | None = None
 _runtime_lock = threading.Lock()
+_ws_clients: set[WebSocket] = set()
+_ws_task: asyncio.Task | None = None
 
 
-def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, ReminderManager]:
-    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager
+def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, ReminderManager, AgentRuntime]:
+    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager, agent_runtime
     with _runtime_lock:
         if keyboard_monitor is None:
             keyboard_monitor = KeyboardMonitor()
@@ -63,18 +74,46 @@ def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, R
             pet_update_adapter = PetUpdateAdapter(keyboard_monitor.settings_store)
         if config_store is None:
             config_store = ConfigStore(keyboard_monitor.settings_store)
-        return keyboard_monitor, pet_update_adapter, config_store, reminder_manager
+        if agent_runtime is None:
+            agent_runtime = AgentRuntime(keyboard_monitor.repository)
+        return keyboard_monitor, pet_update_adapter, config_store, reminder_manager, agent_runtime
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     monitor.start()
+    global _ws_task
+    _ws_task = asyncio.create_task(_ws_broadcast_loop())
     yield
+    if _ws_task is not None:
+        _ws_task.cancel()
+        _ws_task = None
     monitor.stop()
 
 
 app = FastAPI(title="Perch Local API", version="0.2.0", lifespan=lifespan)
+async def _ws_broadcast_loop() -> None:
+    while True:
+        if not _ws_clients:
+            await asyncio.sleep(1.0)
+            continue
+        try:
+            payload = get_pet_update_payload().model_dump(mode="json")
+            to_remove: list[WebSocket] = []
+            for client in _ws_clients:
+                try:
+                    await client.send_json(payload)
+                except Exception:
+                    to_remove.append(client)
+            for client in to_remove:
+                _ws_clients.discard(client)
+        except Exception:
+            # Keep loop alive even if one cycle fails.
+            pass
+        await asyncio.sleep(1.0)
+
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -98,29 +137,50 @@ def get_state() -> PetState:
 
 @app.get("/monitoring/state", response_model=MonitoringState)
 def get_monitoring_state() -> MonitoringState:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     return monitor.snapshot()
 
 
-@app.get("/pet/update", response_model=PetState)
-def get_pet_update_payload() -> PetState:
-    monitor, adapter, _, reminders = _ensure_runtime()
+@app.get("/pet/update", response_model=PetUpdatePayload)
+def get_pet_update_payload() -> PetUpdatePayload:
+    monitor, _, store, reminders, runtime = _ensure_runtime()
     reminder_update = reminders.pop_pending_update()
     if reminder_update is not None:
-        return reminder_update
+        return PetUpdatePayload(
+            visible=reminder_update.visible,
+            emotion="happy" if reminder_update.emotion == "idle" else reminder_update.emotion,
+            speak=reminder_update.speak,
+            reason="reminder_pending",
+            durationMs=4000,
+        )
 
     state = monitor.snapshot()
-    status_duration_seconds = monitor.current_status_duration_seconds()
-    return adapter.build_update(
-        status_duration_seconds=status_duration_seconds,
-        current_kpm=state.kpm_value,
-        status_label=state.status.label,
+    bundle = store.load_bundle()
+    decision = runtime.run_cycle(
+        state=state,
+        profile=bundle.profile,
+        settings=bundle.settings,
     )
+    return runtime.as_pet_update_payload(decision)
+
+
+@app.websocket("/ws/pet/update")
+async def ws_pet_update(websocket: WebSocket) -> None:
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    try:
+        while True:
+            # Keep connection open; payloads are pushed by broadcast loop.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        _ws_clients.discard(websocket)
+    except Exception:
+        _ws_clients.discard(websocket)
 
 
 @app.get("/monitoring/history", response_model=list[HistoryPoint])
 def get_monitoring_history(period: str = Query(default="1h")) -> list[HistoryPoint]:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     try:
         return monitor.history(period=period)
     except ValueError as exc:
@@ -129,19 +189,19 @@ def get_monitoring_history(period: str = Query(default="1h")) -> list[HistoryPoi
 
 @app.get("/monitoring/config", response_model=MonitoringSettings)
 def get_monitoring_config() -> MonitoringSettings:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     return monitor.config()
 
 
 @app.put("/monitoring/config", response_model=MonitoringSettings)
 def update_monitoring_config(config: MonitoringSettings) -> MonitoringSettings:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     return monitor.update_config(config)
 
 
 @app.put("/settings/thresholds", response_model=MonitoringSettings)
 def update_thresholds(payload: ThresholdsUpdateRequest) -> MonitoringSettings:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     settings = monitor.config()
     settings.idle_limit = payload.idle_limit
     settings.focus_threshold = payload.focus_threshold
@@ -152,22 +212,51 @@ def update_thresholds(payload: ThresholdsUpdateRequest) -> MonitoringSettings:
 
 @app.get("/config/load", response_model=ConfigBundle)
 def load_config_bundle() -> ConfigBundle:
-    _, _, store, _ = _ensure_runtime()
+    _, _, store, _, _ = _ensure_runtime()
     return store.load_bundle()
 
 
 @app.post("/config/save-profile", response_model=SaveResult)
 def save_profile(profile: UserProfile) -> SaveResult:
-    _, _, store, _ = _ensure_runtime()
+    _, _, store, _, _ = _ensure_runtime()
     store.save_profile(profile)
     return SaveResult(success=True, message="profile saved")
 
 
 @app.post("/config/save-settings", response_model=SaveResult)
 def save_settings(settings: MonitoringSettings) -> SaveResult:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     monitor.update_config(settings)
     return SaveResult(success=True, message="settings saved")
+
+
+@app.get("/ai/decision/latest", response_model=PetDecision | None)
+def get_latest_decision() -> PetDecision | None:
+    monitor, _, _, _, _ = _ensure_runtime()
+    latest = monitor.repository.load_latest_decision()
+    if latest is None:
+        return None
+    return PetDecision.model_validate(latest["decision"])
+
+
+@app.get("/ai/decision/history")
+def get_decision_history(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+    monitor, _, _, _, _ = _ensure_runtime()
+    return monitor.repository.load_decision_history(limit=limit)
+
+
+@app.post("/ai/demo/reset-session", response_model=SaveResult)
+def reset_ai_demo_session() -> SaveResult:
+    _, _, _, _, runtime = _ensure_runtime()
+    runtime.reset_demo_session()
+    return SaveResult(success=True, message="ai demo session reset")
+
+
+@app.get("/ai/calendar/next")
+def get_next_calendar_meeting() -> dict:
+    _, _, _, _, runtime = _ensure_runtime()
+    meeting = runtime.next_calendar_meeting()
+    return {"meeting": meeting}
 
 
 @app.get("/debug/thresholds", response_class=HTMLResponse)
