@@ -1,0 +1,36 @@
+body {
+  margin: 0;
+  font-family: sans-serif;
+}
+
+.app {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+}
+
+.pet {
+  text-align: center;
+}
+
+.pet-avatar {
+  font-size: 60px;
+}
+
+.chat-bubble {
+  background: white;
+  border: 1px solid #ccc;
+  padding: 8px;
+  margin-top: 8px;
+  border-radius: 10px;
+}
+
+.modal, .panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: white;
+  padding: 20px;
+  border: 1px solid #ccc;
+}
