@@ -58,6 +58,7 @@ class MetricsRepository:
                         ELSE 0
                     END
                     """
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS habit_profile (
@@ -93,7 +94,20 @@ class MetricsRepository:
                 connection.execute(
                     "ALTER TABLE decision_history ADD COLUMN llm_success INTEGER NOT NULL DEFAULT 0"
                 )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    window_start TEXT,
+                    window_end TEXT,
+                    tags_json TEXT,
+                    score REAL
                 )
+                """
+            )
             connection.commit()
 
     def save_minute_record(
@@ -326,4 +340,89 @@ class MetricsRepository:
             "blocked_by": row["blocked_by"],
             "llm_attempted": bool(row["llm_attempted"]),
             "llm_success": bool(row["llm_success"]),
+        }
+
+    def save_memory_note(
+        self,
+        *,
+        timestamp: datetime,
+        source: str,
+        note: str,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+        tags: list[str] | None = None,
+        score: float | None = None,
+    ) -> None:
+        with self._lock:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO memory_notes (
+                        timestamp, source, note, window_start, window_end, tags_json, score
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        timestamp.astimezone(timezone.utc).isoformat(),
+                        source,
+                        note,
+                        window_start.astimezone(timezone.utc).isoformat() if window_start else None,
+                        window_end.astimezone(timezone.utc).isoformat() if window_end else None,
+                        json.dumps(tags or [], ensure_ascii=False),
+                        score,
+                    ),
+                )
+                connection.commit()
+
+    def load_recent_memory_notes(self, *, days: int = 7, limit: int = 5) -> list[dict]:
+        effective_limit = max(1, min(limit, 50))
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+        with self._lock:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT timestamp, source, note, window_start, window_end, tags_json, score
+                    FROM memory_notes
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (since, effective_limit),
+                ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            result.append(
+                {
+                    "timestamp": row["timestamp"],
+                    "source": row["source"],
+                    "note": row["note"],
+                    "window_start": row["window_start"],
+                    "window_end": row["window_end"],
+                    "tags": json.loads(str(row["tags_json"])) if row["tags_json"] else [],
+                    "score": row["score"],
+                }
+            )
+        return result
+
+    def load_latest_memory_note(self) -> dict | None:
+        with self._lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT timestamp, source, note, window_start, window_end, tags_json, score
+                    FROM memory_notes
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        if row is None:
+            return None
+        return {
+            "timestamp": row["timestamp"],
+            "source": row["source"],
+            "note": row["note"],
+            "window_start": row["window_start"],
+            "window_end": row["window_end"],
+            "tags": json.loads(str(row["tags_json"])) if row["tags_json"] else [],
+            "score": row["score"],
         }
