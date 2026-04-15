@@ -405,6 +405,24 @@ def _semantic_behavior_narrative(
     )
 
 
+def _memory_keywords(text: str) -> set[str]:
+    lowered = text.lower()
+    keywords = {
+        "late",
+        "night",
+        "sleep",
+        "rest",
+        "tired",
+        "focus",
+        "idle",
+        "offline",
+        "break",
+        "fatigue",
+        "work",
+    }
+    return {word for word in keywords if word in lowered}
+
+
 class AgentRuntime:
     def __init__(
         self,
@@ -751,6 +769,7 @@ class AgentRuntime:
 
                 if emotion not in {"happy", "eat", "play"}:
                     emotion = base_decision.emotion
+                speak = self._enforce_memory_reference_for_greeting(reason=reason, speak=speak)
                 output_tokens = _estimate_tokens(speak)
                 if output_tokens > OUTPUT_TOKEN_BUDGET:
                     speak = speak[: OUTPUT_TOKEN_BUDGET * 3]
@@ -969,6 +988,29 @@ class AgentRuntime:
         notes = self._repository.load_recent_memory_notes(days=LONG_MEMORY_LOOKBACK_DAYS, limit=LONG_MEMORY_PROMPT_LIMIT)
         self._cached_long_memory_notes = [str(item.get("note", "")).strip() for item in notes if item.get("note")]
 
+    def _enforce_memory_reference_for_greeting(self, *, reason: str, speak: str) -> str:
+        if reason not in {"morning_greeting", "daytime_greeting"}:
+            return speak
+        if not self._cached_long_memory_notes:
+            return speak
+        joined_notes = " ".join(self._cached_long_memory_notes)
+        note_keywords = _memory_keywords(joined_notes)
+        if not note_keywords:
+            return speak
+        speak_keywords = _memory_keywords(speak)
+        if speak_keywords.intersection(note_keywords):
+            return speak
+        # Force one concise memory trend mention when greeting but memory exists.
+        user_line = "friend"
+        memory_hint = self._cached_long_memory_notes[0]
+        patched = f"{speak.rstrip('. ')} Also, {user_line}, {memory_hint}"
+        patched = _normalize_cat_tone(patched)
+        words = patched.split(" ")
+        if len(words) > MAX_SPEAK_WORDS:
+            patched = " ".join(words[:MAX_SPEAK_WORDS])
+            patched = _normalize_cat_tone(patched)
+        return patched
+
     def _fallback_decision(self, *, reason: str, emotion: str) -> PetDecision:
         return PetDecision(
             visible=True,
@@ -1054,7 +1096,9 @@ class AgentRuntime:
                     "Task: Use the provided [Context] to send one warm encouragement or gentle reminder. "
                     "Return strict JSON only: {\"speak\":\"...\",\"emotion\":\"happy|eat|play\"}. "
                     "Constraints: English only, at most 20 words in speak, no markdown, no extra keys. "
-                    "Address user by name when available."
+                    "Address user by name when available. "
+                    "If reason is morning_greeting or daytime_greeting and long_term_notes is non-empty, "
+                    "you MUST mention one trend from long_term_notes in the speak text."
                 ),
             }
         )
