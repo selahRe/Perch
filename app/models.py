@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 StatusLabel = Literal["Idle", "Relaxed", "Focused"]
+UserClusterLabel = Literal["deep_work", "low_energy", "offline_rest"]
 PetEmotion = Literal["happy", "eat", "play", "idle"]
 GenderType = Literal["male", "female", "other", "prefer_not_to_say"]
 ReminderType = Literal["hydration", "stretching", "meeting", "custom"]
@@ -58,6 +59,11 @@ class StatusClassification(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class ClusterClassification(BaseModel):
+    status: StatusClassification
+    user_cluster: UserClusterLabel
+
+
 class MonitoringSettings(BaseModel):
     reminder_types: list[ReminderType] = Field(
         default_factory=lambda: ["hydration", "stretching", "meeting"]
@@ -73,6 +79,11 @@ class MonitoringSettings(BaseModel):
         default_factory=lambda: ["Code", "Cursor", "IntelliJ IDEA", "PyCharm", "WebStorm"]
     )
     developer_focus_delta: int = 10
+    work_time_start: str = "13:30"
+    work_time_end: str = "18:00"
+    auto_work_window_enabled: bool = True
+    work_window_ema_alpha: float = 0.3
+    last_work_window_update_at: datetime | None = None
     protocol_adapter: ProtocolAdapterSettings = Field(default_factory=ProtocolAdapterSettings)
 
 
@@ -93,6 +104,8 @@ class UserProfile(BaseModel):
     username: str = ""
     gender: GenderType = "prefer_not_to_say"
     free_time: str = Field(default="", alias="freeTime")
+    work_time_start: str = "13:30"
+    work_time_end: str = "18:00"
     reminders: ReminderPreferences = Field(default_factory=ReminderPreferences)
     onboarding_completed: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -111,7 +124,9 @@ class SaveResult(BaseModel):
 class MonitoringState(BaseModel):
     timestamp: datetime
     kpm_value: int
+    status_code: int = 0
     status: StatusClassification
+    user_cluster: UserClusterLabel = "offline_rest"
     app_name: str | None = None
     current_minute_count: int = 0
     listener_running: bool = False

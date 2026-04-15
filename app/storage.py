@@ -5,6 +5,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 
+
+def _status_code_from_label(status_label: str) -> int:
+    if status_label == "Focused":
+        return 2
+    if status_label == "Relaxed":
+        return 1
+    return 0
+
+
 class MetricsRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -34,6 +43,20 @@ class MetricsRepository:
             column_names = {row[1] for row in columns}
             if "app_name" not in column_names:
                 connection.execute("ALTER TABLE monitoring_history ADD COLUMN app_name TEXT")
+            if "is_work_hour" not in column_names:
+                connection.execute("ALTER TABLE monitoring_history ADD COLUMN is_work_hour INTEGER NOT NULL DEFAULT 0")
+            if "status_code" not in column_names:
+                connection.execute("ALTER TABLE monitoring_history ADD COLUMN status_code INTEGER NOT NULL DEFAULT 0")
+                connection.execute(
+                    """
+                    UPDATE monitoring_history
+                    SET status_code = CASE status_label
+                        WHEN 'Focused' THEN 2
+                        WHEN 'Relaxed' THEN 1
+                        ELSE 0
+                    END
+                    """
+                )
             connection.commit()
 
     def save_minute_record(
@@ -42,19 +65,23 @@ class MetricsRepository:
         kpm_value: int,
         status_label: str,
         app_name: str | None = None,
+        is_work_hour: bool = False,
+        status_code: int | None = None,
     ) -> None:
         with self._lock:
             with self._connect() as connection:
                 connection.execute(
                     """
-                    INSERT INTO monitoring_history (timestamp, kpm_value, status_label, app_name)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO monitoring_history (timestamp, kpm_value, status_label, app_name, is_work_hour, status_code)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         timestamp.astimezone(timezone.utc).isoformat(),
                         kpm_value,
                         status_label,
                         app_name,
+                        1 if is_work_hour else 0,
+                        _status_code_from_label(status_label) if status_code is None else status_code,
                     ),
                 )
                 connection.commit()
@@ -81,8 +108,10 @@ class MetricsRepository:
                         id,
                         timestamp,
                         kpm_value,
+                        status_code,
                         status_label,
-                        app_name
+                        app_name,
+                        is_work_hour
                     FROM monitoring_history
                     WHERE timestamp >= ?
                     ORDER BY timestamp ASC
@@ -90,3 +119,46 @@ class MetricsRepository:
                     (since_timestamp.astimezone(timezone.utc).isoformat(),),
                 ).fetchall()
         return list(rows)
+
+    def count_history(self, since_timestamp: datetime) -> int:
+        with self._lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM monitoring_history
+                    WHERE timestamp >= ?
+                    """,
+                    (since_timestamp.astimezone(timezone.utc).isoformat(),),
+                ).fetchone()
+        return int(row["total"]) if row is not None else 0
+
+    def backfill_is_work_hour(self, detector) -> int:
+        with self._lock:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, timestamp, kpm_value, app_name
+                    FROM monitoring_history
+                    """
+                ).fetchall()
+                updates: list[tuple[int, int]] = []
+                for row in rows:
+                    timestamp = datetime.fromisoformat(row["timestamp"])
+                    is_work_hour = detector(
+                        timestamp=timestamp,
+                        app_name=row["app_name"],
+                        kpm_value=int(row["kpm_value"]),
+                    )
+                    updates.append((1 if is_work_hour else 0, int(row["id"])))
+
+                connection.executemany(
+                    """
+                    UPDATE monitoring_history
+                    SET is_work_hour = ?
+                    WHERE id = ?
+                    """,
+                    updates,
+                )
+                connection.commit()
+        return len(updates)
