@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,6 +14,44 @@ class PetState(BaseModel):
     visible: bool = True
     emotion: PetEmotion = "happy"
     speak: str = ""
+
+
+DecisionEmotion = Literal["happy", "eat", "play"]
+DecisionSource = Literal["rule", "ai", "fallback"]
+
+
+class KpmAggregate(BaseModel):
+    kpm_1m: int = 0
+    kpm_5m: float = 0
+    kpm_30m_avg: float = 0
+
+
+class AppSnapshot(BaseModel):
+    active_app: str | None = None
+    status_label: StatusLabel = "Idle"
+    status_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    status_duration_sec: int = Field(default=0, ge=0)
+
+
+class DecisionContext(BaseModel):
+    timestamp: datetime
+    kpm: KpmAggregate
+    app: AppSnapshot
+    profile: "UserProfile"
+    settings: "MonitoringSettings"
+    session_digest: str = ""
+    recent_interactions: list[str] = Field(default_factory=list)
+    recent_decisions_digest: list[str] = Field(default_factory=list)
+    habit_profile: dict[str, Any] = Field(default_factory=dict)
+
+
+class PetDecision(BaseModel):
+    visible: bool = True
+    emotion: DecisionEmotion = "happy"
+    speak: str = ""
+    reason: str = Field(min_length=1)
+    source: DecisionSource = "rule"
+    durationMs: int | None = None
 
 
 class PetBehaviorRule(BaseModel):
@@ -126,3 +164,6 @@ class HistoryPoint(BaseModel):
     kpm: int
     label: StatusLabel
     app_name: str | None = None
+
+
+DecisionContext.model_rebuild()

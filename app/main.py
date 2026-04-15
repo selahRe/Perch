@@ -5,12 +5,14 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
+from .agent_runtime import AgentRuntime
 from .config_store import ConfigStore
 from .models import (
     ConfigBundle,
     HistoryPoint,
     MonitoringSettings,
     MonitoringState,
+    PetDecision,
     PetState,
     SaveResult,
     ThresholdsUpdateRequest,
@@ -25,11 +27,12 @@ keyboard_monitor: KeyboardMonitor | None = None
 pet_update_adapter: PetUpdateAdapter | None = None
 config_store: ConfigStore | None = None
 reminder_manager: ReminderManager | None = None
+agent_runtime: AgentRuntime | None = None
 _runtime_lock = threading.Lock()
 
 
-def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, ReminderManager]:
-    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager
+def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, ReminderManager, AgentRuntime]:
+    global keyboard_monitor, pet_update_adapter, config_store, reminder_manager, agent_runtime
     with _runtime_lock:
         if keyboard_monitor is None:
             keyboard_monitor = KeyboardMonitor()
@@ -53,12 +56,14 @@ def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, R
             pet_update_adapter = PetUpdateAdapter(keyboard_monitor.settings_store)
         if config_store is None:
             config_store = ConfigStore(keyboard_monitor.settings_store)
-        return keyboard_monitor, pet_update_adapter, config_store, reminder_manager
+        if agent_runtime is None:
+            agent_runtime = AgentRuntime(keyboard_monitor.repository)
+        return keyboard_monitor, pet_update_adapter, config_store, reminder_manager, agent_runtime
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     monitor.start()
     yield
     monitor.stop()
@@ -88,29 +93,30 @@ def get_state() -> PetState:
 
 @app.get("/monitoring/state", response_model=MonitoringState)
 def get_monitoring_state() -> MonitoringState:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     return monitor.snapshot()
 
 
 @app.get("/pet/update", response_model=PetState)
 def get_pet_update_payload() -> PetState:
-    monitor, adapter, _, reminders = _ensure_runtime()
+    monitor, _, store, reminders, runtime = _ensure_runtime()
     reminder_update = reminders.pop_pending_update()
     if reminder_update is not None:
         return reminder_update
 
     state = monitor.snapshot()
-    status_duration_seconds = monitor.current_status_duration_seconds()
-    return adapter.build_update(
-        status_duration_seconds=status_duration_seconds,
-        current_kpm=state.kpm_value,
-        status_label=state.status.label,
+    bundle = store.load_bundle()
+    decision = runtime.run_cycle(
+        state=state,
+        profile=bundle.profile,
+        settings=bundle.settings,
     )
+    return runtime.as_pet_state(decision)
 
 
 @app.get("/monitoring/history", response_model=list[HistoryPoint])
 def get_monitoring_history(period: str = Query(default="1h")) -> list[HistoryPoint]:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     try:
         return monitor.history(period=period)
     except ValueError as exc:
@@ -119,19 +125,19 @@ def get_monitoring_history(period: str = Query(default="1h")) -> list[HistoryPoi
 
 @app.get("/monitoring/config", response_model=MonitoringSettings)
 def get_monitoring_config() -> MonitoringSettings:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     return monitor.config()
 
 
 @app.put("/monitoring/config", response_model=MonitoringSettings)
 def update_monitoring_config(config: MonitoringSettings) -> MonitoringSettings:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     return monitor.update_config(config)
 
 
 @app.put("/settings/thresholds", response_model=MonitoringSettings)
 def update_thresholds(payload: ThresholdsUpdateRequest) -> MonitoringSettings:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     settings = monitor.config()
     settings.idle_limit = payload.idle_limit
     settings.focus_threshold = payload.focus_threshold
@@ -142,22 +148,37 @@ def update_thresholds(payload: ThresholdsUpdateRequest) -> MonitoringSettings:
 
 @app.get("/config/load", response_model=ConfigBundle)
 def load_config_bundle() -> ConfigBundle:
-    _, _, store, _ = _ensure_runtime()
+    _, _, store, _, _ = _ensure_runtime()
     return store.load_bundle()
 
 
 @app.post("/config/save-profile", response_model=SaveResult)
 def save_profile(profile: UserProfile) -> SaveResult:
-    _, _, store, _ = _ensure_runtime()
+    _, _, store, _, _ = _ensure_runtime()
     store.save_profile(profile)
     return SaveResult(success=True, message="profile saved")
 
 
 @app.post("/config/save-settings", response_model=SaveResult)
 def save_settings(settings: MonitoringSettings) -> SaveResult:
-    monitor, _, _, _ = _ensure_runtime()
+    monitor, _, _, _, _ = _ensure_runtime()
     monitor.update_config(settings)
     return SaveResult(success=True, message="settings saved")
+
+
+@app.get("/ai/decision/latest", response_model=PetDecision | None)
+def get_latest_decision() -> PetDecision | None:
+    monitor, _, _, _, _ = _ensure_runtime()
+    latest = monitor.repository.load_latest_decision()
+    if latest is None:
+        return None
+    return PetDecision.model_validate(latest["decision"])
+
+
+@app.get("/ai/decision/history")
+def get_decision_history(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+    monitor, _, _, _, _ = _ensure_runtime()
+    return monitor.repository.load_decision_history(limit=limit)
 
 
 @app.get("/debug/thresholds", response_class=HTMLResponse)
