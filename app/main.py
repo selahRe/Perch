@@ -5,7 +5,16 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config_store import ConfigStore
-from .models import ConfigBundle, HistoryPoint, MonitoringSettings, MonitoringState, PetState, SaveResult, UserProfile
+from .models import (
+    ConfigBundle,
+    HistoryPoint,
+    MonitoringSettings,
+    MonitoringState,
+    PetState,
+    SaveResult,
+    ThresholdsUpdateRequest,
+    UserProfile,
+)
 from .monitoring import KeyboardMonitor, RETENTION_HOURS
 from .protocol_adapter import PetUpdateAdapter
 from .reminder_manager import ReminderManager
@@ -25,6 +34,7 @@ def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, R
             keyboard_monitor = KeyboardMonitor()
         if reminder_manager is None:
             reminder_manager = ReminderManager(keyboard_monitor.settings_store)
+            active_reminder_manager = reminder_manager
             monitor = keyboard_monitor
 
             def on_minute_complete(state: MonitoringState) -> None:
@@ -35,7 +45,7 @@ def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, R
                     app_name=state.app_name,
                 )
                 monitor.repository.cleanup_older_than(hours=RETENTION_HOURS)
-                reminder_manager.process_minute(state)
+                active_reminder_manager.process_minute(state)
 
             keyboard_monitor.on_minute_complete = on_minute_complete
         if pet_update_adapter is None:
@@ -116,6 +126,17 @@ def get_monitoring_config() -> MonitoringSettings:
 def update_monitoring_config(config: MonitoringSettings) -> MonitoringSettings:
     monitor, _, _, _ = _ensure_runtime()
     return monitor.update_config(config)
+
+
+@app.put("/settings/thresholds", response_model=MonitoringSettings)
+def update_thresholds(payload: ThresholdsUpdateRequest) -> MonitoringSettings:
+    monitor, _, _, _ = _ensure_runtime()
+    settings = monitor.config()
+    settings.idle_limit = payload.idle_limit
+    settings.focus_threshold = payload.focus_threshold
+    settings.kpm_thresholds["idle"] = payload.idle_limit
+    settings.kpm_thresholds["focus"] = payload.focus_threshold
+    return monitor.update_config(settings)
 
 
 @app.get("/config/load", response_model=ConfigBundle)
