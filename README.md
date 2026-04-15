@@ -56,6 +56,11 @@ Endpoints:
 - `GET /config/load`: load onboarding profile and settings bundle
 - `POST /config/save-profile`: save onboarding profile JSON
 - `POST /config/save-settings`: save settings JSON
+- `GET /ai/decision/latest`: latest AI/rule decision payload
+- `GET /ai/decision/history?limit=50`: recent decision history with observability fields (`source`, `llm_attempted`, `llm_success`, `blocked_by`)
+- `POST /ai/demo/reset-session`: reset first-greeting/demo session state
+- `GET /ai/calendar/next`: inspect next meeting from configured calendar provider
+- `WS /ws/pet/update`: websocket push channel for pet updates
 - `GET /debug/thresholds`: built-in HTML tuner page for live threshold adjustment
 
 State classification output:
@@ -97,3 +102,38 @@ Monitoring details:
 Note:
 
 - On macOS, `pynput` needs Accessibility permission for the terminal or editor to capture global keyboard events.
+
+## AI Runtime Extras
+
+### Interruption policy (Issue #8)
+
+- Busy typing (high KPM) defaults to silent updates (`speak=""`) to protect deep work.
+- Input drop / low-frequency windows can emit nudges.
+- Meeting reminders are priority exceptions and can still speak during deep work.
+
+### Mock calendar provider (Issue #9)
+
+Enable calendar simulation in `.env`:
+
+```bash
+PERCH_CALENDAR_MOCK_ENABLED=true
+PERCH_CALENDAR_MOCK_NEXT_MEETING_IN_MINUTES=5
+PERCH_CALENDAR_MOCK_NEXT_MEETING_TITLE=Design Sync
+```
+
+Or point to a JSON file:
+
+```bash
+PERCH_CALENDAR_MOCK_ENABLED=true
+PERCH_CALENDAR_MOCK_FILE=/absolute/path/to/calendar_mock.json
+```
+
+See `calendar_mock.example.json` for schema.
+
+### Demo chat mode
+
+For classroom demos, disable chat cooldown/limits:
+
+```bash
+PERCH_DEMO_CHAT_MODE=true
+```

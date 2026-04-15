@@ -10,9 +10,11 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import random
+from pathlib import Path
 
 import httpx
 
+from .interruption_logic import InterruptionLogic
 from .models import (
     AppSnapshot,
     DecisionContext,
@@ -84,6 +86,78 @@ class CalendarProvider:
     def meeting_starts_in_minutes(self) -> int | None:
         return None
 
+    def next_meeting(self) -> dict | None:
+        return None
+
+
+class MockCalendarProvider(CalendarProvider):
+    def __init__(self, *, data_file: Path | None = None) -> None:
+        self._data_file = data_file
+
+    def meeting_starts_in_minutes(self) -> int | None:
+        meeting = self.next_meeting()
+        if meeting is None:
+            return None
+        return int(meeting["starts_in_minutes"])
+
+    def next_meeting(self) -> dict | None:
+        now = datetime.now(timezone.utc)
+        events = self._load_events()
+        upcoming: list[tuple[datetime, str]] = []
+        for item in events:
+            start = self._parse_start_at(item.get("start_at"))
+            if start is None or start < now:
+                continue
+            title = str(item.get("title", "Meeting")).strip() or "Meeting"
+            upcoming.append((start, title))
+        if not upcoming:
+            return None
+        upcoming.sort(key=lambda x: x[0])
+        start_at, title = upcoming[0]
+        starts_in_minutes = max(0, int((start_at - now).total_seconds() // 60))
+        return {
+            "title": title,
+            "start_at": start_at.isoformat(),
+            "starts_in_minutes": starts_in_minutes,
+            "source": "mock_calendar",
+        }
+
+    def _load_events(self) -> list[dict]:
+        env_minutes = (os.getenv("PERCH_CALENDAR_MOCK_NEXT_MEETING_IN_MINUTES") or "").strip()
+        if env_minutes:
+            try:
+                minutes = int(env_minutes)
+                title = os.getenv("PERCH_CALENDAR_MOCK_NEXT_MEETING_TITLE", "Design Sync")
+                start_at = datetime.now(timezone.utc) + timedelta(minutes=max(0, minutes))
+                return [{"title": title, "start_at": start_at.isoformat()}]
+            except ValueError:
+                pass
+        if self._data_file and self._data_file.exists():
+            try:
+                payload = json.loads(self._data_file.read_text(encoding="utf-8"))
+                if isinstance(payload, dict) and isinstance(payload.get("events"), list):
+                    return [item for item in payload["events"] if isinstance(item, dict)]
+                if isinstance(payload, list):
+                    return [item for item in payload if isinstance(item, dict)]
+            except Exception:
+                return []
+        return []
+
+    @staticmethod
+    def _parse_start_at(value: object) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            return None
+
 
 class AnimationHook:
     def emit(self, scenario_tag: str) -> None:
@@ -112,6 +186,15 @@ def _resolve_llm_chat_completions_url() -> str:
     if lower.endswith("/v1"):
         return f"{raw}/chat/completions"
     return f"{raw}/v1/chat/completions"
+
+
+def _build_calendar_provider_from_env() -> CalendarProvider:
+    enabled = (os.getenv("PERCH_CALENDAR_MOCK_ENABLED") or "").strip().lower()
+    if enabled in {"1", "true", "yes", "on"}:
+        data_file_env = (os.getenv("PERCH_CALENDAR_MOCK_FILE") or "").strip()
+        data_file = Path(data_file_env) if data_file_env else None
+        return MockCalendarProvider(data_file=data_file)
+    return CalendarProvider()
 
 
 def _normalize_cat_tone(text: str) -> str:
@@ -213,8 +296,9 @@ class AgentRuntime:
         self._observation_store = ObservationStore()
         self._session_digest = SessionDigest()
         self._habit_profile = HabitProfile(repository)
-        self._calendar_provider = calendar_provider or CalendarProvider()
+        self._calendar_provider = calendar_provider or _build_calendar_provider_from_env()
         self._animation_hook = animation_hook or AnimationHook()
+        self._interruption_logic = InterruptionLogic()
         self._recent_decisions: deque[PetDecision] = deque(maxlen=MAX_RECENT_DECISION_DIGESTS)
         self._recent_interactions: deque[str] = deque(maxlen=MAX_RECENT_INTERACTIONS)
         self._decision_timestamps: deque[datetime] = deque()
@@ -262,17 +346,29 @@ class AgentRuntime:
                 blocked_by = "llm_fallback"
                 decision = self._fallback_decision(reason=reason, emotion=decision.emotion)
 
-        emitted = self._emit(decision)
-        if not emitted:
-            blocked_by = blocked_by or "cooldown"
-            decision = PetDecision(
-                visible=True,
-                emotion=decision.emotion,
-                speak="...",
-                reason="cooldown_suppressed",
-                source="rule",
-                durationMs=2000,
-            )
+        interruption = self._interruption_logic.evaluate(
+            context=context,
+            decision=decision,
+            previous_kpm=self._previous_kpm,
+        )
+        if not interruption.allow_speak:
+            blocked_by = blocked_by or interruption.blocked_by or "interruption_policy"
+            decision = decision.model_copy(update={"speak": ""})
+            emitted = True
+        else:
+            emitted = self._emit(decision)
+            if emitted:
+                self._interruption_logic.mark_emit()
+            if not emitted:
+                blocked_by = blocked_by or "cooldown"
+                decision = PetDecision(
+                    visible=True,
+                    emotion=decision.emotion,
+                    speak="...",
+                    reason="cooldown_suppressed",
+                    source="rule",
+                    durationMs=2000,
+                )
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         context_hash = hashlib.sha1(
@@ -654,3 +750,6 @@ class AgentRuntime:
         self._last_emit_at = None
         self._last_reason_at.clear()
         self._decision_timestamps.clear()
+
+    def next_calendar_meeting(self) -> dict | None:
+        return self._calendar_provider.next_meeting()

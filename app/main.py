@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
+import asyncio
 from pathlib import Path
 import threading
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -34,6 +35,8 @@ config_store: ConfigStore | None = None
 reminder_manager: ReminderManager | None = None
 agent_runtime: AgentRuntime | None = None
 _runtime_lock = threading.Lock()
+_ws_clients: set[WebSocket] = set()
+_ws_task: asyncio.Task | None = None
 
 
 def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, ReminderManager, AgentRuntime]:
@@ -70,11 +73,37 @@ def _ensure_runtime() -> tuple[KeyboardMonitor, PetUpdateAdapter, ConfigStore, R
 async def lifespan(app: FastAPI):
     monitor, _, _, _, _ = _ensure_runtime()
     monitor.start()
+    global _ws_task
+    _ws_task = asyncio.create_task(_ws_broadcast_loop())
     yield
+    if _ws_task is not None:
+        _ws_task.cancel()
+        _ws_task = None
     monitor.stop()
 
 
 app = FastAPI(title="Perch Local API", version="0.2.0", lifespan=lifespan)
+async def _ws_broadcast_loop() -> None:
+    while True:
+        if not _ws_clients:
+            await asyncio.sleep(1.0)
+            continue
+        try:
+            payload = get_pet_update_payload().model_dump(mode="json")
+            to_remove: list[WebSocket] = []
+            for client in _ws_clients:
+                try:
+                    await client.send_json(payload)
+                except Exception:
+                    to_remove.append(client)
+            for client in to_remove:
+                _ws_clients.discard(client)
+        except Exception:
+            # Keep loop alive even if one cycle fails.
+            pass
+        await asyncio.sleep(1.0)
+
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -123,6 +152,20 @@ def get_pet_update_payload() -> PetUpdatePayload:
         settings=bundle.settings,
     )
     return runtime.as_pet_update_payload(decision)
+
+
+@app.websocket("/ws/pet/update")
+async def ws_pet_update(websocket: WebSocket) -> None:
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    try:
+        while True:
+            # Keep connection open; payloads are pushed by broadcast loop.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        _ws_clients.discard(websocket)
+    except Exception:
+        _ws_clients.discard(websocket)
 
 
 @app.get("/monitoring/history", response_model=list[HistoryPoint])
@@ -197,6 +240,13 @@ def reset_ai_demo_session() -> SaveResult:
     _, _, _, _, runtime = _ensure_runtime()
     runtime.reset_demo_session()
     return SaveResult(success=True, message="ai demo session reset")
+
+
+@app.get("/ai/calendar/next")
+def get_next_calendar_meeting() -> dict:
+    _, _, _, _, runtime = _ensure_runtime()
+    meeting = runtime.next_calendar_meeting()
+    return {"meeting": meeting}
 
 
 @app.get("/debug/thresholds", response_class=HTMLResponse)
